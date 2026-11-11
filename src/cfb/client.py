@@ -23,7 +23,7 @@ def _build_session() -> requests.Session:
     """A requests session that retries transient failures with backoff."""
     retry = Retry(
         total=3,
-        backoff_factor=1,  # waits ~1s, 2s, 4s between attempts
+        backoff_factor=1,  # urllib3 2.x waits 0s, 2s, 4s before retries 1-3
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET"],
         respect_retry_after_header=True,
