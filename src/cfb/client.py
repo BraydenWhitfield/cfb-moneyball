@@ -53,7 +53,7 @@ class CFBDClient:
             "Accept": "application/json",
         }
         self.api_calls = 0  # real network calls made by this client
-        self._printed_headers = False
+        self.calls_remaining = None  # monthly quota left, per the last response
 
     def cache_path(self, endpoint: str, params: dict) -> Path:
         """Map an endpoint + params to a file, e.g.
@@ -82,10 +82,10 @@ class CFBDClient:
             timeout=self.timeout,
         )
         self.api_calls += 1
-        if not self._printed_headers:
-            # One-time look at what the API reports (e.g. remaining-call quota).
-            print(f"CFBD response headers: {dict(response.headers)}")
-            self._printed_headers = True
+        # Read the quota before raise_for_status(), so it updates even on errors.
+        remaining = response.headers.get("X-CallLimit-Remaining")
+        if remaining is not None and remaining.isdigit():
+            self.calls_remaining = int(remaining)
         response.raise_for_status()
         data = response.json()
 

@@ -4,7 +4,7 @@ from cfb.client import CFBDClient
 class FakeResponse:
     def __init__(self, data):
         self._data = data
-        self.headers = {}
+        self.headers = {"X-CallLimit-Remaining": "998"}
 
     def raise_for_status(self):
         pass
@@ -45,6 +45,7 @@ def test_get_caches_response_and_sends_auth(tmp_path):
     assert client.get("/recruiting/players", year=2021) == payload
     assert len(session.calls) == 1
     assert client.api_calls == 1
+    assert client.calls_remaining == 998  # read from the response header
 
 
 def test_session_retries_transient_errors_only():
