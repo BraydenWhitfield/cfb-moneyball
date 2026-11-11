@@ -1,0 +1,17 @@
+# Secrets
+.env
+
+# Data (pulled from the API; reproducible, and may be large)
+data/
+
+# Python cache / build files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Virtual environment
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
