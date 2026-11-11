@@ -45,3 +45,25 @@ def test_get_caches_response_and_sends_auth(tmp_path):
     assert client.get("/recruiting/players", year=2021) == payload
     assert len(session.calls) == 1
     assert client.api_calls == 1
+
+
+def test_session_retries_transient_errors_only():
+    from cfb.client import _build_session
+
+    adapter = _build_session().get_adapter("https://api.collegefootballdata.com")
+    retry = adapter.max_retries
+
+    assert retry.total == 3
+    assert retry.allowed_methods == ["GET"]
+    assert retry.respect_retry_after_header
+    # Rate limits and server errors are retried...
+    assert {429, 500, 502, 503, 504} <= set(retry.status_forcelist)
+    # ...but auth / not-found errors are not (retrying won't fix them).
+    assert not {401, 403, 404} & set(retry.status_forcelist)
+
+    # Backoff before each retry: 0s, 2s, 4s (urllib3 2.x).
+    waits = []
+    for _ in range(3):
+        retry = retry.increment(method="GET", url="/x")
+        waits.append(retry.get_backoff_time())
+    assert waits == [0, 2, 4]
