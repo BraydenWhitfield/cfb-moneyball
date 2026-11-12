@@ -107,6 +107,13 @@ def market_tier(stars: pd.Series) -> pd.Series:
 
 def clean_recruits(recruits: pd.DataFrame) -> pd.DataFrame:
     df = recruits.copy()
+    # Negative athleteIds (646 rows, 2017-2019 classes) are placeholders, not real
+    # CFBD IDs: treat them as missing so the name fallback gets a chance.
+    if "athleteId" not in df:
+        df["athleteId"] = pd.NA
+    df["athleteId"] = df.athleteId.astype("string")
+    df["athlete_id_placeholder"] = df.athleteId.str.startswith("-").fillna(False).astype(bool)
+    df.loc[df.athlete_id_placeholder, "athleteId"] = pd.NA
     df["name_key"] = norm_name(df.name)
     df["committedTo"] = norm_team(df.committedTo)
     df["position_group"] = position_group(df.position)

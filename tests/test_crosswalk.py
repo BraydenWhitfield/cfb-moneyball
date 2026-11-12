@@ -1,5 +1,4 @@
-"""Spec for the step 2 crosswalk. Most of these fail with NotImplementedError
-until the TODO functions in src/cfb/crosswalk.py are written."""
+"""Tests for the player crosswalk (src/cfb/crosswalk.py)."""
 
 import pandas as pd
 import pytest
@@ -22,7 +21,7 @@ def recruit(rid, name, athlete_id=None, year=2021, team="Ohio State", position="
         "position_group": group or {"PRO": "QB", "DUAL": "QB", "APB": "RB"}.get(position, position),
         "qb_style": {"PRO": "pro", "DUAL": "dual"}.get(position),
         "stars": stars, "rating": rating, "market_tier": str(int(stars)) if stars else "unrated",
-        "ranking_suspect": False,
+        "ranking_suspect": False, "athlete_id_placeholder": False,
     }
 
 
@@ -162,6 +161,13 @@ def _name_match(rid, pid, ambiguous=False):
             "ambiguous": ambiguous}
 
 
+def test_match_by_name_also_tries_recruits_whose_athlete_id_never_plays():
+    recs = recruits_df(recruit("r1", "Jamire Calvin", athlete_id="4277735", position="WR"))
+    stats = stats_df(stat_line("4245147", "Jamire Calvin", 2021, group="WR"))  # different ID
+    out = by_recruit(match_recruits_by_name(recs, stats))
+    assert out.loc["r1", "player_id"] == "4245147"
+
+
 def _frames(id_rows, name_rows):
     cols_id = ["recruit_id", "player_id", "match_method", "has_stats"]
     cols_nm = ["recruit_id", "player_id", "match_method", "ambiguous"]
@@ -194,6 +200,26 @@ def test_resolve_conflicts_passes_ambiguous_through():
     assert out.loc["r2", "ambiguous"] and not out.loc["r2", "conflict"]
     assert not out.loc["r1", "has_stats"] and not out.loc["r1", "ambiguous"]
     assert set(out.match_method) <= set(MATCH_METHODS)
+
+
+def test_resolve_conflicts_upgrades_stale_athlete_id_to_clean_name_match():
+    ids, names = _frames([_id_match("r1", "OLD", has_stats=False)], [_name_match("r1", "NEW")])
+    out = by_recruit(resolve_conflicts(ids, names))
+    assert len(out) == 1
+    assert out.loc["r1", "player_id"] == "NEW"
+    assert out.loc["r1", "match_method"] == "name_team_season"
+    assert out.loc["r1", "replaced_athlete_id"] == "OLD"
+    assert out.loc["r1", "has_stats"]
+
+
+def test_resolve_conflicts_failed_upgrade_keeps_original_athlete_id():
+    # r1's stale ID would upgrade to "5", but r2 owns "5" by athleteId.
+    ids, names = _frames([_id_match("r1", "OLD", has_stats=False), _id_match("r2", "5")],
+                         [_name_match("r1", "5")])
+    out = by_recruit(resolve_conflicts(ids, names))
+    assert out.loc["r1", "player_id"] == "OLD" and out.loc["r1", "match_method"] == "athlete_id"
+    assert not out.loc["r1", "conflict"] and pd.isna(out.loc["r1", "replaced_athlete_id"])
+    assert out.loc["r2", "player_id"] == "5"
 
 
 # --- resolve_college_position ------------------------------------------------------
@@ -236,3 +262,101 @@ def test_build_players_one_row_per_recruit_with_person_ids_and_ath_resolution():
     assert out.loc["r3", "position_group"] == "ATH"  # nothing to resolve from
     assert not out.loc["r3", "has_stats"]
     assert out.loc["r3", "market_tier"] == "unrated"
+
+
+# --- Portal (step 3) ------------------------------------------------------------
+
+def portal_entry(first, last, season=2023, origin="Illinois", destination="Texas Tech",
+                 position="RB", date="2022-12-15"):
+    """One row of clean_portal() output."""
+    from cfb.clean import clean_portal
+    return clean_portal(pd.DataFrame([{
+        "season": season, "firstName": first, "lastName": last, "position": position,
+        "origin": origin, "destination": destination,
+        "transferDate": pd.Timestamp(date, tz="UTC"), "rating": None, "stars": 3.0,
+        "eligibility": "Immediate"}])).iloc[0].to_dict()
+
+
+def portal_df(*rows):
+    return pd.DataFrame(rows)
+
+
+def test_match_portal_destination_origin_both_and_windows():
+    from cfb.crosswalk import match_portal
+    portal = portal_df(
+        portal_entry("Kyron", "Cumby"),                          # found at both schools
+        portal_entry("Dest", "Only"),                            # only plays after
+        portal_entry("Too", "Late"),                             # dest line 3 seasons later
+        portal_entry("Nobody", "Here"),
+    )
+    stats = stats_df(
+        stat_line("1", "Kyron Cumby", 2022, team="Illinois", group="RB"),
+        stat_line("1", "Kyron Cumby", 2023, team="Texas Tech", group="RB"),
+        stat_line("2", "Dest Only", 2024, team="Texas Tech", group="RB"),   # season + 1: ok
+        stat_line("3", "Too Late", 2026, team="Texas Tech", group="RB"),    # season + 3: no
+    )
+    out = match_portal(portal, stats).set_index("portal_key")
+    keys = portal.portal_key.tolist()
+    assert out.loc[keys[0], "player_id"] == "1" and out.loc[keys[0], "match_side"] == "both"
+    assert out.loc[keys[1], "player_id"] == "2" and out.loc[keys[1], "match_side"] == "destination"
+    for k in keys[2:]:
+        assert out.loc[k, "match_method"] == "unmatched" and pd.isna(out.loc[k, "player_id"])
+    assert len(out) == 4  # every entry present
+
+
+def test_match_portal_sides_disagreeing_is_ambiguous():
+    from cfb.crosswalk import match_portal
+    portal = portal_df(portal_entry("Mark", "Williams"))
+    stats = stats_df(stat_line("1", "Mark Williams", 2022, team="Illinois", group="RB"),
+                     stat_line("2", "Mark Williams", 2023, team="Texas Tech", group="RB"))
+    row = match_portal(portal, stats).iloc[0]
+    assert row.ambiguous and row.match_method == "unmatched" and pd.isna(row.player_id)
+
+
+def test_link_recruits_to_portal_requires_origin_season_and_unique_recruit():
+    from cfb.crosswalk import link_recruits_to_portal
+    recs = recruits_df(
+        recruit("r1", "Kyron Cumby", year=2021, team="Illinois", position="RB"),
+        recruit("r2", "Late Signee", year=2024, team="Illinois", position="RB"),  # class after entry
+        recruit("r3", "Twin Name", year=2020, team="Illinois", position="RB"),
+        recruit("r4", "Twin Name", year=2021, team="Illinois", position="RB"),    # namesake
+    )
+    portal = portal_df(portal_entry("Kyron", "Cumby"), portal_entry("Late", "Signee"),
+                       portal_entry("Twin", "Name"))
+    out = link_recruits_to_portal(recs, portal)
+    assert out.recruit_id.tolist() == ["r1"]
+
+
+def test_build_crosswalk_transfer_path_portal_only_people_and_links():
+    from cfb.crosswalk import build_crosswalk
+    recs = recruits_df(
+        recruit("r1", "Kyron Cumby", year=2021, team="Illinois", position="RB"),  # never played at Illinois
+        recruit("r2", "Juco Guy", year=2021, team="Illinois", position="RB"),     # left for JUCO
+    )
+    portal = portal_df(
+        portal_entry("Kyron", "Cumby"),                                            # plays at Texas Tech
+        portal_entry("Juco", "Guy", destination="Garden City C.C."),               # no stats anywhere
+        portal_entry("Walk", "On", origin="Delaware", destination="Towson"),       # no recruit record
+    )
+    stats = stats_df(stat_line("1", "Kyron Cumby", 2023, team="Texas Tech", group="RB"),
+                     stat_line("9", "Walk On", 2023, team="Towson", group="RB"))
+    players, links = build_crosswalk(recs, portal, stats)
+    p = players.set_index("person_id")
+    l = links.set_index("portal_key")
+    k_cumby, k_juco, k_walk = portal.portal_key
+
+    # r1 rescued through the portal: recruit -> portal entry -> player 1
+    assert p.loc["1", "recruit_id"] == "r1" and p.loc["1", "via_portal"]
+    assert p.loc["1", "recruit_match_method"] == "name_team_season"
+    assert l.loc[k_cumby, "person_id"] == "1" and l.loc[k_cumby, "recruit_id"] == "r1"
+
+    # r2 unmatched, but their portal entry still belongs to them
+    assert l.loc[k_juco, "person_id"] == "rec:r2"
+    assert p.loc["rec:r2", "n_portal_entries"] == 1 and not p.loc["rec:r2", "has_stats"]
+
+    # portal-only person, keyed by player_id, not a recruit
+    assert l.loc[k_walk, "person_id"] == "9"
+    assert not p.loc["9", "in_recruits"] and p.loc["9", "has_stats"]
+
+    assert players.person_id.is_unique
+    assert links.person_id.isin(players.person_id).all()

@@ -164,3 +164,12 @@ def test_combine_usage_splits_blanks_usage_and_takes_position_from_ppa():
     assert pd.isna(g["usage.overall"]) and pd.isna(g["usage.rush"])  # not additive -> unknown
     single = out.query("id == '999'").iloc[0]
     assert single["usage.overall"] == pytest.approx(0.074)  # untouched
+
+
+def test_clean_recruits_treats_negative_athlete_ids_as_placeholders():
+    recruits = pd.DataFrame({"year": [2017] * 2, "name": ["A", "B"], "committedTo": ["X"] * 2,
+                             "position": ["QB"] * 2, "stars": [3.0] * 2, "rating": [0.8] * 2,
+                             "ranking": [1.0] * 2, "athleteId": ["-1001807", "4428852"]})
+    out = clean_recruits(recruits)
+    assert out.athlete_id_placeholder.tolist() == [True, False]
+    assert pd.isna(out.athleteId.iloc[0]) and out.athleteId.iloc[1] == "4428852"

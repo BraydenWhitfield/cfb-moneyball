@@ -104,9 +104,15 @@ def _summarize_candidates(candidates, left_key, method):
 
 
 def match_recruits_by_name(recruits: pd.DataFrame, stat_players: pd.DataFrame) -> pd.DataFrame:
-    """Fallback for recruits without an athleteId: same normalized name, team ==
-    committedTo, stat season >= class year, compatible position."""
-    no_id = recruits[recruits.athleteId.isna()].rename(columns={"id": "recruit_id"})
+    """Name fallback: same normalized name, team == committedTo, stat season >=
+    class year, compatible position.
+
+    Applies to recruits with no athleteId AND to recruits whose athleteId never
+    appears on the field (possibly a stale/duplicate ID - see resolve_conflicts).
+    """
+    on_field = set(stat_players.player_id.dropna())
+    eligible = recruits.athleteId.isna() | ~recruits.athleteId.isin(on_field)
+    no_id = recruits[eligible].rename(columns={"id": "recruit_id"})
     cand = no_id.merge(stat_players, left_on=["name_key", "committedTo"],
                        right_on=["name_key", "team"])
     cand = cand[cand.stat_season >= cand.year]
@@ -120,14 +126,29 @@ def resolve_conflicts(id_matches: pd.DataFrame, name_matches: pd.DataFrame) -> p
     athlete_id matches always win. A name match is dropped (-> unmatched,
     conflict=True) if its player_id is claimed by an athlete_id match or by
     another name match. Ambiguous rows pass through unchanged.
+
+    Stale-ID upgrade: a recruit whose athleteId never appears on the field but
+    who has a clean (unique, unclaimed) name match switches to the matched ID;
+    the old one is kept in replaced_athlete_id. A failed upgrade leaves the
+    original athlete_id match untouched.
     """
-    ids = id_matches.assign(ambiguous=False, conflict=False)
-    names = name_matches.assign(has_stats=~name_matches.ambiguous.astype(bool), conflict=False)
+    ids = id_matches.assign(ambiguous=False, conflict=False, replaced_athlete_id=pd.NA)
+    names = name_matches.assign(has_stats=~name_matches.ambiguous.astype(bool), conflict=False,
+                                replaced_athlete_id=pd.NA)
 
     claimed_by_id = set(ids.player_id.dropna())
     has_pid = names.player_id.notna()
     claims = names.loc[has_pid, "player_id"].value_counts()
     clash = has_pid & (names.player_id.isin(claimed_by_id) | names.player_id.map(claims).gt(1))
+
+    upgrade = names.recruit_id.isin(ids.recruit_id)    # recruit also has an athleteId
+    good_upgrade = upgrade & has_pid & ~clash
+    old_id = ids.set_index("recruit_id").player_id
+    names.loc[good_upgrade, "replaced_athlete_id"] = names.loc[good_upgrade, "recruit_id"].map(old_id)
+    ids = ids[~ids.recruit_id.isin(names.loc[good_upgrade, "recruit_id"])]
+    names = names[~upgrade | good_upgrade].copy()      # failed upgrades: keep the ID row
+    clash = clash.loc[names.index]
+
     names.loc[clash, "player_id"] = pd.NA
     names.loc[clash, "match_method"] = "unmatched"
     names.loc[clash, "has_stats"] = False
@@ -136,8 +157,10 @@ def resolve_conflicts(id_matches: pd.DataFrame, name_matches: pd.DataFrame) -> p
     out = pd.concat([ids, names], ignore_index=True)
     for col in ["has_stats", "ambiguous", "conflict"]:
         out[col] = out[col].astype(bool)
-    out["player_id"] = out.player_id.astype("string")
-    return out[["recruit_id", "player_id", "match_method", "has_stats", "ambiguous", "conflict"]]
+    for col in ["player_id", "replaced_athlete_id"]:
+        out[col] = out[col].astype("string")
+    return out[["recruit_id", "player_id", "match_method", "has_stats", "ambiguous", "conflict",
+                "replaced_athlete_id"]]
 
 
 def resolve_college_position(player_ids: pd.Series, stat_players: pd.DataFrame) -> pd.Series:
@@ -159,7 +182,8 @@ def resolve_college_position(player_ids: pd.Series, stat_players: pd.DataFrame) 
 PLAYER_COLUMNS = [
     "person_id", "player_id", "recruit_id", "name", "year", "committedTo",
     "position_signing", "position_group", "qb_style", "stars", "rating", "market_tier",
-    "ranking_suspect", "recruit_match_method", "has_stats", "ambiguous", "conflict",
+    "ranking_suspect", "athlete_id_placeholder", "recruit_match_method", "has_stats",
+    "ambiguous", "conflict", "replaced_athlete_id",
 ]
 
 
@@ -182,3 +206,165 @@ def build_players(recruits: pd.DataFrame, stat_players: pd.DataFrame) -> pd.Data
     df = df.rename(columns={"position": "position_signing",
                             "match_method": "recruit_match_method"})
     return df[PLAYER_COLUMNS].reset_index(drop=True)
+
+
+# --- Portal -> players (step 3) -------------------------------------------------
+
+# Stat seasons searched, relative to the portal `season` (= the season played at
+# the destination). Chosen on real data: wider windows add <0.5% matches but
+# more ambiguity. Where both sides find a player they agree 99% of the time.
+DESTINATION_WINDOW = (0, 1)
+ORIGIN_WINDOW = (-2, -1)
+
+
+def _portal_candidates(portal, stat_players, team_col, window, side):
+    cand = portal.merge(stat_players, left_on=["name_key", team_col],
+                        right_on=["name_key", "team"])
+    offset = cand.stat_season - cand.season
+    cand = cand[(offset >= window[0]) & (offset <= window[1])]
+    cand = cand[_compatible_rows(cand, "position_group", "stat_position_group")]
+    return cand[["portal_key", "player_id"]].assign(side=side)
+
+
+def match_portal(portal: pd.DataFrame, stat_players: pd.DataFrame) -> pd.DataFrame:
+    """One row per portal entry (clean_portal output) -> player_id.
+
+    Searches the destination (stat season within DESTINATION_WINDOW) and the
+    origin (ORIGIN_WINDOW) by name + team + compatible position. One distinct
+    player across both sides -> matched; several -> ambiguous (unmatched).
+    Portal rows carry no IDs, so match_method is "name_team_season" or "unmatched".
+    match_side: "destination", "origin", "both", or <NA>.
+    """
+    cand = pd.concat([
+        _portal_candidates(portal, stat_players, "destination", DESTINATION_WINDOW,
+                           "destination"),
+        _portal_candidates(portal, stat_players, "origin", ORIGIN_WINDOW, "origin"),
+    ], ignore_index=True)
+    summary = _summarize_candidates(cand, "portal_key", "name_team_season")
+    sides = (cand.drop_duplicates(["portal_key", "side"]).groupby("portal_key").side
+                 .agg(lambda s: "both" if len(s) == 2 else s.iloc[0]))
+    summary["match_side"] = (summary.portal_key.map(sides)
+                             .where(~summary.ambiguous).astype("string"))
+
+    out = portal[["portal_key"]].merge(summary, on="portal_key", how="left")
+    out["match_method"] = out.match_method.fillna("unmatched")
+    out["ambiguous"] = out.ambiguous.astype("boolean").fillna(False).astype(bool)
+    out["player_id"] = out.player_id.astype("string")
+    return out
+
+
+def link_recruits_to_portal(recruits: pd.DataFrame, portal: pd.DataFrame) -> pd.DataFrame:
+    """Recruit <-> portal entry pairs: same name, portal origin == committedTo,
+    portal season >= class year, compatible position.
+
+    Each portal entry links to at most one recruit (two same-named recruits at
+    one school -> neither, never a guess). A recruit may have several entries
+    (e.g. withdrew, then re-entered the next year).
+    """
+    pairs = recruits.rename(columns={"id": "recruit_id"}).merge(
+        portal, left_on=["name_key", "committedTo"], right_on=["name_key", "origin"],
+        suffixes=("_rec", "_portal"))
+    pairs = pairs[pairs.season >= pairs.year]
+    pairs = pairs[_compatible_rows(pairs, "position_group_rec", "position_group_portal")]
+    one_recruit = pairs.groupby("portal_key").recruit_id.transform("nunique").eq(1)
+    return (pairs.loc[one_recruit, ["recruit_id", "portal_key"]]
+                 .astype("string").drop_duplicates().reset_index(drop=True))
+
+
+def apply_transfer_path(players, portal_matches, recruit_portal):
+    """Unmatched recruits inherit the player_id of their matched portal entry.
+
+    Catches recruits who never recorded a stat at the school they signed with,
+    then played after transferring. Skipped when the recruit's entries point to
+    several players, or the player_id is already claimed (conflict rule).
+    Adds a `via_portal` column.
+    """
+    players = players.assign(via_portal=False)
+    open_ = (players.recruit_match_method.eq("unmatched")
+             & ~players.ambiguous & ~players.conflict)
+    cand = (recruit_portal.merge(portal_matches[["portal_key", "player_id"]], on="portal_key")
+                          .dropna(subset=["player_id"]))
+    cand = cand[cand.recruit_id.isin(players.loc[open_, "recruit_id"])]
+    per_recruit = cand.groupby("recruit_id").player_id.agg(["nunique", "first"])
+    per_recruit = per_recruit.loc[per_recruit["nunique"] == 1, "first"]
+
+    claimed = set(players.player_id.dropna())
+    claims = per_recruit.value_counts()
+    new_ids = per_recruit[~per_recruit.isin(claimed) & per_recruit.map(claims).eq(1)]
+
+    hit = players.recruit_id.isin(new_ids.index)
+    players.loc[hit, "player_id"] = players.loc[hit, "recruit_id"].map(new_ids)
+    players.loc[hit, "person_id"] = players.loc[hit, "player_id"]
+    players.loc[hit, "recruit_match_method"] = "name_team_season"
+    players.loc[hit, "has_stats"] = True
+    players.loc[hit, "via_portal"] = True
+    return players
+
+
+def _new_people(rows: pd.DataFrame, stat_players: pd.DataFrame) -> pd.DataFrame:
+    """players-table rows for people with no recruit record."""
+    out = rows.reindex(columns=PLAYER_COLUMNS)
+    out["has_stats"] = out.player_id.isin(set(stat_players.player_id.dropna()))
+    out["ambiguous"] = False
+    out["conflict"] = False
+    out["via_portal"] = False
+    out["in_recruits"] = False
+    return out
+
+
+PORTAL_LINK_COLUMNS = [
+    "portal_key", "person_id", "player_id", "recruit_id", "match_method", "match_side",
+    "ambiguous", "link_conflict", "season", "firstName", "lastName", "position",
+    "position_group", "origin", "destination", "transferDate", "eligibility", "withdrawn",
+    "went_pro", "stars", "rating", "market_tier", "date_season_mismatch",
+]
+
+
+def build_crosswalk(recruits: pd.DataFrame, portal: pd.DataFrame,
+                    stat_players: pd.DataFrame):
+    """Recruits + portal -> (players, portal_links).
+
+    players: one row per person - recruits, plus people seen only in the
+             portal (in_recruits=False). Adds via_portal, n_portal_entries,
+             first_portal_season.
+    portal_links: one row per portal entry with its person_id.
+    """
+    portal_matches = match_portal(portal, stat_players)
+    recruit_portal = link_recruits_to_portal(recruits, portal)
+    players = apply_transfer_path(build_players(recruits, stat_players),
+                                  portal_matches, recruit_portal)
+    players["in_recruits"] = True
+
+    # Each portal entry's person. A matched entry belongs to whichever recruit
+    # owns that player_id; if the name link pointed at a different recruit, flag it.
+    links = (portal.merge(portal_matches, on="portal_key", how="left")
+                   .merge(recruit_portal, on="portal_key", how="left"))
+    owner = players.dropna(subset=["player_id"]).set_index("player_id").recruit_id
+    owner_of_match = links.player_id.map(owner)
+    links["link_conflict"] = (links.player_id.notna() & links.recruit_id.notna()
+                              & owner_of_match.fillna("").ne(links.recruit_id)).astype(bool)
+    links["recruit_id"] = owner_of_match.where(links.player_id.notna(), links.recruit_id)
+    links.loc[links.link_conflict & owner_of_match.isna(), "recruit_id"] = pd.NA
+    rec_person = players.set_index("recruit_id").person_id
+    links["person_id"] = (links.player_id
+                          .fillna(links.recruit_id.map(rec_person))
+                          .fillna("portal:" + links.portal_key)).astype("string")
+    links["recruit_id"] = links.recruit_id.astype("string")
+
+    # People who appear only in the portal (latest entry supplies name/position).
+    extra = (links[~links.person_id.isin(set(players.person_id))]
+             .sort_values("transferDate").drop_duplicates("person_id", keep="last"))
+    college = resolve_college_position(extra.player_id, stat_players)
+    group = extra.position_group.where(extra.position_group.ne("ATH"),
+                                       extra.player_id.map(college)).fillna("ATH")
+    players = pd.concat([players, _new_people(pd.DataFrame({
+        "person_id": extra.person_id, "player_id": extra.player_id,
+        "name": extra.firstName + " " + extra.lastName, "position_group": group,
+    }), stat_players)], ignore_index=True)
+
+    counts = links.groupby("person_id").agg(n_portal_entries=("portal_key", "size"),
+                                            first_portal_season=("season", "min"))
+    players = players.join(counts, on="person_id")
+    players["n_portal_entries"] = players.n_portal_entries.fillna(0).astype(int)
+    players["first_portal_season"] = players.first_portal_season.astype("Int64")
+    return players.reset_index(drop=True), links[PORTAL_LINK_COLUMNS].reset_index(drop=True)
