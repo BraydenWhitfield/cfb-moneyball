@@ -1,10 +1,16 @@
-"""Player crosswalk: link recruits (and later portal + draft) to on-field IDs.
+"""Player crosswalk: link recruits, portal entries, and draft picks to on-field IDs.
 
-Step 2 scope: recruits -> CFBD player IDs, and the `players` table.
+Run `python -m cfb.crosswalk` to write data/processed/:
+  players.parquet       one row per person (person_id)
+  portal_links.parquet  one row per portal entry, with its person_id
+  coverage.txt          match rates by source
 
 Key fact: recruit `athleteId`, stats `playerId`, PPA `id`, and draft
-`collegeAthleteId` are the SAME ID space (CFBD athlete IDs).
+`collegeAthleteId` are the SAME ID space (CFBD athlete IDs). person_id is that
+ID when known, else "rec:<recruit id>", "portal:<portal_key>", or
+"draft:<year>-<overall>".
 
+match_method: "athlete_id", "name_team_season", or "unmatched".
 Matching never guesses: when a rule finds more than one candidate the row is
 left unmatched and flagged (`ambiguous`), and one player_id never belongs to
 two recruits (`conflict`).
@@ -193,7 +199,7 @@ def build_players(recruits: pd.DataFrame, stat_players: pd.DataFrame) -> pd.Data
                               match_recruits_by_name(recruits, stat_players))
     df = recruits.assign(recruit_id=recruits.id.astype("string")).merge(
         links, on="recruit_id", how="left")
-    df["match_method"] = df.match_method.fillna("unmatched")
+    df["match_method"] = df.match_method.astype("string").fillna("unmatched")
     for col in ["has_stats", "ambiguous", "conflict"]:
         df[col] = df[col].astype("boolean").fillna(False).astype(bool)
     df["person_id"] = df.player_id.fillna("rec:" + df.recruit_id)
@@ -247,7 +253,7 @@ def match_portal(portal: pd.DataFrame, stat_players: pd.DataFrame) -> pd.DataFra
                              .where(~summary.ambiguous).astype("string"))
 
     out = portal[["portal_key"]].merge(summary, on="portal_key", how="left")
-    out["match_method"] = out.match_method.fillna("unmatched")
+    out["match_method"] = out.match_method.astype("string").fillna("unmatched")
     out["ambiguous"] = out.ambiguous.astype("boolean").fillna(False).astype(bool)
     out["player_id"] = out.player_id.astype("string")
     return out
@@ -368,3 +374,159 @@ def build_crosswalk(recruits: pd.DataFrame, portal: pd.DataFrame,
     players["n_portal_entries"] = players.n_portal_entries.fillna(0).astype(int)
     players["first_portal_season"] = players.first_portal_season.astype("Int64")
     return players.reset_index(drop=True), links[PORTAL_LINK_COLUMNS].reset_index(drop=True)
+
+
+# --- Draft -> players (step 4) ---------------------------------------------------
+
+DRAFT_COLUMNS = ["drafted", "draft_year", "draft_round", "draft_overall", "draft_nfl_team",
+                 "draft_match_method"]
+
+
+def match_draft(draft: pd.DataFrame, stat_players: pd.DataFrame) -> pd.DataFrame:
+    """One row per draft pick -> player_id.
+
+    collegeAthleteId -> "athlete_id" (it's the same ID space). Picks without one
+    fall back to name + collegeTeam + a stat season up to the draft year.
+    A player_id claimed by two picks is dropped from both (conflict).
+    """
+    picks = draft.assign(
+        draft_key=draft.year.astype("string") + "-" + draft.overall.astype("string"),
+        name_key=norm_name(draft.name), collegeTeam=norm_team(draft.collegeTeam),
+        position_group=position_group(draft.position))
+
+    by_name = picks[picks.collegeAthleteId.isna()].merge(
+        stat_players, left_on=["name_key", "collegeTeam"], right_on=["name_key", "team"])
+    by_name = by_name[by_name.stat_season <= by_name.year]
+    by_name = by_name[_compatible_rows(by_name, "position_group", "stat_position_group")]
+    name_matches = _summarize_candidates(by_name, "draft_key", "name_team_season")
+
+    out = picks.merge(name_matches.rename(columns={"player_id": "name_player_id"}),
+                      on="draft_key", how="left")
+    has_id = out.collegeAthleteId.notna()
+    out["player_id"] = out.collegeAthleteId.astype("string").where(has_id, out.name_player_id)
+    out["draft_match_method"] = (out.match_method.astype("string")
+                                 .where(~has_id, "athlete_id").fillna("unmatched"))
+
+    dupes = out.player_id.notna() & out.player_id.duplicated(keep=False)
+    out.loc[dupes, ["player_id", "draft_match_method"]] = [pd.NA, "unmatched"]
+    out["draft_conflict"] = dupes
+    out["player_id"] = out.player_id.astype("string")
+    return out
+
+
+def attach_draft(players: pd.DataFrame, draft: pd.DataFrame,
+                 stat_players: pd.DataFrame) -> pd.DataFrame:
+    """Add draft columns to players; picks with no matching person become
+    new people (person_id = player_id, or "draft:<year>-<overall>")."""
+    picks = match_draft(draft, stat_players).rename(columns={
+        "year": "draft_year", "round": "draft_round", "overall": "draft_overall",
+        "nflTeam": "draft_nfl_team"})
+    picks["drafted"] = True
+    picks["person_id"] = picks.player_id.fillna("draft:" + picks.draft_key).astype("string")
+
+    new = picks[~picks.person_id.isin(set(players.person_id))]
+    players = pd.concat([players, _new_people(pd.DataFrame({
+        "person_id": new.person_id, "player_id": new.player_id, "name": new.name,
+        "position_group": new.position_group}), stat_players)], ignore_index=True)
+    players["n_portal_entries"] = players.n_portal_entries.fillna(0).astype(int)
+
+    players = players.merge(picks[["person_id"] + DRAFT_COLUMNS], on="person_id", how="left")
+    players["drafted"] = players.drafted.astype("boolean").fillna(False).astype(bool)
+    return players
+
+
+# --- Output (step 4) --------------------------------------------------------------
+
+def _tidy_types(df: pd.DataFrame) -> pd.DataFrame:
+    """Give mixed object columns one type each so Parquet can store them."""
+    df = df.copy()
+    for col in df.columns:
+        if df[col].dtype == object:
+            values = df[col].dropna()
+            if len(values) and values.map(lambda v: isinstance(v, bool)).all():
+                df[col] = df[col].astype("boolean")
+            elif len(values) and values.map(lambda v: isinstance(v, (int, float))).all():
+                df[col] = pd.to_numeric(df[col])
+            else:
+                df[col] = df[col].astype("string")
+    for col in ["year", "draft_year", "draft_round", "draft_overall"]:
+        if col in df:
+            df[col] = df[col].astype("Int64")
+    return df
+
+
+def build_all(raw_dir=None):
+    """Load raw data, clean it, and build (players, portal_links, stat_players)."""
+    from cfb import clean, load
+    kw = {} if raw_dir is None else {"raw_dir": raw_dir}
+    recruits = clean.clean_recruits(load.load_recruits(**kw))
+    portal = clean.clean_portal(load.load_portal(**kw))
+    ppa = clean.combine_ppa_splits(clean.dedupe_player_seasons(load.load_ppa(**kw)))
+    stat_players = build_stat_players(load.load_stats(**kw), ppa)
+    players, portal_links = build_crosswalk(recruits, portal, stat_players)
+    players = attach_draft(players, load.load_draft(**kw), stat_players)
+    return _tidy_types(players), _tidy_types(portal_links), stat_players
+
+
+def coverage_report(players: pd.DataFrame, portal_links: pd.DataFrame) -> str:
+    """Plain-text summary of how well each source links up."""
+    scope = ["QB", "RB", "WR"]
+    rec = players[players.in_recruits]
+    lines = [
+        f"people: {len(players):,}  (recruits {len(rec):,}, portal/draft only "
+        f"{(~players.in_recruits).sum():,})",
+        "",
+        "recruits by match method: "
+        + ", ".join(f"{k} {v:,}" for k, v in rec.recruit_match_method.value_counts().items()),
+        f"  via portal {int(rec.via_portal.sum())}, stale IDs replaced "
+        f"{int(rec.replaced_athlete_id.notna().sum())}, placeholder IDs "
+        f"{int(rec.athlete_id_placeholder.fillna(False).sum())}, ambiguous "
+        f"{int(rec.ambiguous.sum())}, conflicts {int(rec.conflict.sum())}",
+    ]
+    s = rec[rec.position_group.isin(scope) & rec.year.between(2021, 2025)]
+    rates = s.groupby("position_group").has_stats.mean().reindex(scope)
+    lines.append("  QB/RB/WR (2021-2025 classes) with any stat line: "
+                 + ", ".join(f"{k} {v:.1%}" for k, v in rates.items()))
+
+    moved = portal_links[portal_links.destination.notna() & ~portal_links.withdrawn]
+    lines += [
+        "",
+        "portal entries by match method: "
+        + ", ".join(f"{k} {v:,}" for k, v in portal_links.match_method.value_counts().items()),
+        f"  ambiguous {int(portal_links.ambiguous.sum())}, link conflicts "
+        f"{int(portal_links.link_conflict.sum())}, linked to a recruit "
+        f"{portal_links.recruit_id.notna().mean():.1%}",
+    ]
+    rates = (moved.assign(ok=moved.match_method.ne("unmatched"))
+                  .groupby("position_group").ok.mean().reindex(scope))
+    lines.append("  QB/RB/WR entrants with a destination, matched: "
+                 + ", ".join(f"{k} {v:.1%}" for k, v in rates.items()))
+
+    drafted = players[players.drafted]
+    lines += [
+        "",
+        f"draft picks: {len(drafted):,}; by method: "
+        + ", ".join(f"{k} {v:,}" for k, v in drafted.draft_match_method.value_counts().items()),
+        f"  drafted with a recruit record: {drafted.in_recruits.mean():.1%}",
+    ]
+    return "\n".join(lines)
+
+
+def main(out_dir=None, raw_dir=None):
+    """`python -m cfb.crosswalk`: build everything and write data/processed/."""
+    from pathlib import Path
+
+    from cfb.client import PROJECT_ROOT
+    out = PROJECT_ROOT / "data" / "processed" if out_dir is None else Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    players, portal_links, _ = build_all(raw_dir)
+    players.to_parquet(out / "players.parquet", index=False)
+    portal_links.to_parquet(out / "portal_links.parquet", index=False)
+    report = coverage_report(players, portal_links)
+    (out / "coverage.txt").write_text(report + "\n", encoding="utf-8")
+    print(report)
+    print(f"\nWrote players.parquet, portal_links.parquet, coverage.txt to {out}")
+
+
+if __name__ == "__main__":
+    main()

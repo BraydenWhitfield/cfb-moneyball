@@ -360,3 +360,95 @@ def test_build_crosswalk_transfer_path_portal_only_people_and_links():
 
     assert players.person_id.is_unique
     assert links.person_id.isin(players.person_id).all()
+
+
+# --- Draft + outputs (step 4) ------------------------------------------------------
+
+def pick(year, overall, name, college_id=None, team="Miami", position="Quarterback"):
+    return {"year": year, "overall": overall, "round": 1, "pick": overall, "name": name,
+            "position": position, "collegeTeam": team, "nflTeam": "Tennessee",
+            "collegeAthleteId": college_id}
+
+
+def draft_df(*rows):
+    df = pd.DataFrame(rows)
+    df["collegeAthleteId"] = df.collegeAthleteId.astype("string")
+    return df
+
+
+def test_match_draft_by_id_then_name_and_drops_double_claims():
+    from cfb.crosswalk import match_draft
+    draft = draft_df(pick(2025, 1, "Cam Ward", college_id="7"),
+                     pick(2025, 2, "No Id", team="Miami"),               # name fallback
+                     pick(2024, 3, "Dup One", college_id="8"),
+                     pick(2025, 4, "Dup Two", college_id="8"))            # same ID twice
+    stats = stats_df(stat_line("7", "Cam Ward", 2024, team="Miami"),
+                     stat_line("5", "No Id", 2024, team="Miami"))
+    out = match_draft(draft, stats).set_index("draft_key")
+    assert out.loc["2025-1", "player_id"] == "7"
+    assert out.loc["2025-1", "draft_match_method"] == "athlete_id"
+    assert out.loc["2025-2", "player_id"] == "5"
+    assert out.loc["2025-2", "draft_match_method"] == "name_team_season"
+    assert out.loc[["2024-3", "2025-4"], "draft_conflict"].all()
+    assert (out.loc[["2024-3", "2025-4"], "draft_match_method"] == "unmatched").all()
+
+
+def test_attach_draft_marks_existing_people_and_adds_new_ones():
+    from cfb.crosswalk import attach_draft, build_crosswalk
+    recs = recruits_df(recruit("r1", "Cam Ward", athlete_id="7", year=2021, team="Miami"))
+    stats = stats_df(stat_line("7", "Cam Ward", 2024, team="Miami"))
+    players, _ = build_crosswalk(recs, portal_df(portal_entry("X", "Y")), stats)
+    out = attach_draft(players, draft_df(pick(2025, 1, "Cam Ward", college_id="7"),
+                                         pick(2025, 9, "Unknown Kid")), stats).set_index("person_id")
+    assert out.loc["7", "drafted"] and out.loc["7", "draft_overall"] == 1
+    assert out.loc["draft:2025-9", "drafted"] and not out.loc["draft:2025-9", "in_recruits"]
+    assert not out.drop(index=["7", "draft:2025-9"]).drafted.any()
+    assert out.index.is_unique
+
+
+def _write_raw(raw):
+    """Minimal raw cache: one file per endpoint, shaped like the real API."""
+    import json
+
+    def put(subdir, name, records):
+        path = raw / subdir / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(records), encoding="utf-8")
+
+    put("recruiting/players", "year=2021.json", [
+        {"id": "r1", "athleteId": "7", "year": 2021, "ranking": 1, "name": "Cam Ward",
+         "committedTo": "Miami", "position": "PRO", "stars": 5, "rating": 0.99},
+        {"id": "r2", "athleteId": "-100", "year": 2021, "ranking": 2, "name": "Placeholder Pat",
+         "committedTo": "Miami", "position": "WR", "stars": 3, "rating": 0.85}])
+    put("player/portal", "year=2023.json", [
+        {"season": 2023, "firstName": "Placeholder", "lastName": "Pat", "position": "WR",
+         "origin": "Miami", "destination": "Texas Tech ", "transferDate": "2022-12-10T00:00:00Z",
+         "rating": None, "stars": None, "eligibility": "Immediate"}])
+    ppa = {"conference": "ACC", "averagePPA": {"all": 0.5}, "totalPPA": {"all": 50.0}}
+    put("ppa/players/season", "year=2024.json", [
+        {"season": 2024, "id": "7", "name": "Cam Ward", "position": "QB", "team": "Miami", **ppa}])
+    put("stats/player/season", "year=2023.json", [
+        {"season": 2023, "playerId": "8", "player": "Placeholder Pat", "position": "WR",
+         "team": "Texas Tech", "conference": "B12", "category": "receiving", "statType": "YDS",
+         "stat": "400"}])
+    put("draft/picks", "year=2025.json", [
+        {"collegeAthleteId": 7, "year": 2025, "overall": 1, "round": 1, "pick": 1,
+         "name": "Cam Ward", "position": "Quarterback", "collegeTeam": "Miami",
+         "nflTeam": "Tennessee"}])
+
+
+def test_main_end_to_end_writes_outputs(tmp_path):
+    from cfb.crosswalk import main
+    raw, out = tmp_path / "raw", tmp_path / "processed"
+    _write_raw(raw)
+    main(out_dir=out, raw_dir=raw)
+
+    players = pd.read_parquet(out / "players.parquet").set_index("person_id")
+    links = pd.read_parquet(out / "portal_links.parquet")
+    assert (out / "coverage.txt").read_text(encoding="utf-8").startswith("people:")
+
+    assert players.loc["7", "drafted"] and players.loc["7", "qb_style"] == "pro"
+    # Negative athleteId ignored -> rescued via portal (Miami -> Texas Tech, padded name)
+    assert players.loc["8", "recruit_id"] == "r2" and players.loc["8", "via_portal"]
+    assert players.loc["8", "athlete_id_placeholder"]
+    assert links.person_id.tolist() == ["8"]
