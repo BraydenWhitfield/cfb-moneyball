@@ -105,3 +105,62 @@ def test_dedupe_player_seasons_refuses_to_drop_rows_with_different_numbers():
     df = pd.DataFrame([_ppa_row(), _ppa_row(conference="", **{"totalPPA.all": 99.0})])
     with pytest.raises(ValueError, match="different numbers"):
         dedupe_player_seasons(df)
+
+
+def _split_rows(kind):
+    """Shamar Garrett, 2021: ~25 plays as RB, ~2 as WR (real numbers)."""
+    base = {"season": 2021, "id": "4571021", "name": "Shamar Garrett", "team": "San José State"}
+    if kind == "ppa":
+        rb = {"position": "RB", "conference": "", "totalPPA.all": 0.925, "averagePPA.all": 0.037,
+              "totalPPA.rush": 0.925, "averagePPA.rush": 0.037,
+              "totalPPA.pass": 0.0, "averagePPA.pass": None}
+        wr = {"position": "WR", "conference": "MWC", "totalPPA.all": -0.748, "averagePPA.all": -0.374,
+              "totalPPA.rush": 0.0, "averagePPA.rush": None,
+              "totalPPA.pass": -0.748, "averagePPA.pass": -0.374}
+    else:
+        rb = {"position": "RB", "conference": "MWC", "usage.overall": 0.074, "usage.rush": 0.085}
+        wr = {"position": "WR", "conference": "MWC", "usage.overall": 0.014, "usage.rush": 0.031}
+    other = {**base, **rb, "id": "999", "name": "Single Season", "conference": "MWC"}
+    return pd.DataFrame([{**base, **rb}, {**base, **wr}, other])
+
+
+def test_combine_ppa_splits_sums_totals_and_reweights_averages():
+    from cfb.clean import combine_ppa_splits
+
+    out = combine_ppa_splits(_split_rows("ppa"))
+    assert len(out) == 2
+    g = out[out.id == "4571021"].iloc[0]
+    assert g.position == "RB"                     # split with the most plays (25 vs 2)
+    assert g.position_split and g.split_positions == "RB|WR"
+    assert g.conference == "MWC"                  # blank conference not kept
+    assert g["totalPPA.all"] == pytest.approx(0.177)
+    assert g["averagePPA.all"] == pytest.approx(0.177 / 27, rel=1e-3)   # 25 + 2 plays
+    assert g["averagePPA.rush"] == pytest.approx(0.037)  # WR had no rushes (NaN avg, 0 total)
+    single = out[out.id == "999"].iloc[0]
+    assert not single.position_split and pd.isna(single.split_positions)
+
+
+def test_combine_ppa_splits_leaves_average_unknown_when_plays_cannot_be_inferred():
+    from cfb.clean import combine_ppa_splits
+
+    rows = _split_rows("ppa")
+    rows.loc[1, ["totalPPA.all", "averagePPA.all"]] = [0.0, 0.0]  # zero avg: plays unknown
+    g = combine_ppa_splits(rows).query("id == '4571021'").iloc[0]
+    assert g["totalPPA.all"] == pytest.approx(0.925)  # totals still exact
+    assert pd.isna(g["averagePPA.all"])
+
+
+def test_combine_usage_splits_blanks_usage_and_takes_position_from_ppa():
+    from cfb.clean import combine_ppa_splits, combine_usage_splits
+
+    usage = _split_rows("usage")
+    usage.loc[1, "usage.overall"] = 0.5   # WR split has higher usage...
+    ppa = combine_ppa_splits(_split_rows("ppa"))  # ...but PPA says RB had more plays
+    out = combine_usage_splits(usage, ppa)
+
+    g = out.query("id == '4571021'").iloc[0]
+    assert g.position == "RB"                     # agrees with the PPA table
+    assert g.position_split and g.split_positions == "RB|WR"
+    assert pd.isna(g["usage.overall"]) and pd.isna(g["usage.rush"])  # not additive -> unknown
+    single = out.query("id == '999'").iloc[0]
+    assert single["usage.overall"] == pytest.approx(0.074)  # untouched

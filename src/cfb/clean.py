@@ -157,7 +157,8 @@ def dedupe_player_seasons(df: pd.DataFrame) -> pd.DataFrame:
     The API returns some (id, season, team, position) rows twice: identical
     numbers, but one copy has a blank conference. Keep the copy that has one.
     Rows for the same player-season under two *different* positions are not
-    repeats (they are position splits with different numbers) and are kept.
+    repeats (they are position splits with different numbers) and are kept;
+    combine_ppa_splits() / combine_usage_splits() merge those afterwards.
     """
     key = ["id", "season", "team", "position"]
     stat_cols = [c for c in df.columns if c not in key + ["name", "conference"]]
@@ -170,7 +171,96 @@ def dedupe_player_seasons(df: pd.DataFrame) -> pd.DataFrame:
     blank_conf = df.conference.fillna("").eq("")
     return (df.assign(_blank=blank_conf)
               .sort_values("_blank")
-              .drop_duplicates(["id", "season", "team", "position"], keep="first")
+              .drop_duplicates(key, keep="first")
               .drop(columns="_blank")
               .sort_index()
               .reset_index(drop=True))
+
+
+SPLIT_KEY = ["id", "season", "team"]
+
+
+def _implied_plays(total, average):
+    """Plays behind an average: total / average. No plays when average is NaN and
+    total is 0 (e.g. a WR's rushing). Unknown (NaN) when average is exactly 0.
+    Not rounded: the API rounds averages to 3 decimals, so this is an estimate."""
+    plays = total / average.where(average != 0)
+    no_plays = average.isna() & total.fillna(0).eq(0)
+    return plays.mask(no_plays, 0.0)
+
+
+def _combine_splits(df, metric_prefixes, weight_fn):
+    """Collapse rows sharing SPLIT_KEY (one row per position) into one row.
+
+    Additive columns (metric_prefixes, e.g. totalPPA.* or usage.*) are summed.
+    The row takes its position, name, and conference from the split with the
+    largest weight_fn(group). Requires dedupe_player_seasons() first.
+    """
+    is_split = df.duplicated(SPLIT_KEY, keep=False)
+    singles = df[~is_split].assign(position_split=False, split_positions=pd.NA)
+    sum_cols = [c for c in df.columns if c.startswith(metric_prefixes)]
+
+    combined = []
+    for _, group in df[is_split].groupby(SPLIT_KEY):
+        row = group.loc[weight_fn(group).idxmax()].copy()
+        row[sum_cols] = group[sum_cols].sum(min_count=1)
+        conferences = group.conference.replace("", pd.NA).dropna()
+        row["conference"] = conferences.iloc[0] if len(conferences) else row.conference
+        row["position_split"] = True
+        row["split_positions"] = "|".join(sorted(group.position))
+        combined.append((group, row))
+    return singles, combined
+
+
+def combine_ppa_splits(ppa: pd.DataFrame) -> pd.DataFrame:
+    """One row per (id, season, team) in the PPA table.
+
+    For ~70 player-seasons the API returns one row per position (e.g. 25 plays
+    as RB, 2 as WR). totalPPA.* is summed exactly; averagePPA.* is recomputed as
+    sum(total) / sum(implied plays), or NaN when the plays can't be inferred.
+    Position = the split with the most plays.
+    """
+    categories = [c.removeprefix("totalPPA.") for c in ppa.columns if c.startswith("totalPPA.")]
+    singles, combined = _combine_splits(
+        ppa, ("totalPPA.",),
+        weight_fn=lambda g: _implied_plays(g["totalPPA.all"], g["averagePPA.all"]).fillna(0))
+
+    rows = []
+    for group, row in combined:
+        for cat in categories:
+            plays = _implied_plays(group[f"totalPPA.{cat}"], group[f"averagePPA.{cat}"])
+            total_plays = plays.sum(min_count=len(plays))  # NaN if any split unknown
+            row[f"averagePPA.{cat}"] = (row[f"totalPPA.{cat}"] / total_plays
+                                        if total_plays and total_plays > 0 else float("nan"))
+        rows.append(row)
+    return _reassemble(singles, rows)
+
+
+def combine_usage_splits(usage: pd.DataFrame, ppa_combined: pd.DataFrame) -> pd.DataFrame:
+    """One row per (id, season, team) in the usage table.
+
+    Split rows' usage.* values are NOT additive: their sum is ~3x what the
+    player's play counts imply (each split seems to use its own denominator),
+    and it can't be recovered. So merged rows get usage.* = NaN, flagged by
+    position_split. Position is taken from combine_ppa_splits() output so the
+    two tables agree on each player's main position.
+    """
+    singles, combined = _combine_splits(usage, ("usage.",),
+                                        weight_fn=lambda g: g["usage.overall"])
+    primary = ppa_combined.set_index(SPLIT_KEY).position
+    usage_cols = [c for c in usage.columns if c.startswith("usage.")]
+    rows = []
+    for group, row in combined:
+        key = tuple(row[SPLIT_KEY])
+        if key in primary.index:
+            row["position"] = primary.loc[key]
+        row[usage_cols] = float("nan")
+        rows.append(row)
+    return _reassemble(singles, rows)
+
+
+def _reassemble(singles, rows):
+    out = pd.concat([singles, pd.DataFrame(rows)], ignore_index=True)
+    out["split_positions"] = out.split_positions.astype("string")
+    out["position_split"] = out.position_split.astype(bool)
+    return out.sort_values(["season", "id"]).reset_index(drop=True)
