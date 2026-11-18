@@ -13,7 +13,8 @@ ID when known, else "rec:<recruit id>", "portal:<portal_key>", or
 
 match_method: "athlete_id"; "name_team_season" (exact normalized name, same
 team, season window); "name_variant" (same team and window, close name - see
-names_are_variants); or "unmatched".
+names_are_variants); "nationwide_name" (recruits only: a name unique among all
+stat lines, any team - see apply_nationwide_name); or "unmatched".
 Matching never guesses: when a rule finds more than one candidate the row is
 left unmatched and flagged (`ambiguous`), and one player_id never belongs to
 two recruits (`conflict`).
@@ -26,7 +27,8 @@ import pandas as pd
 
 from cfb.clean import NICKNAMES, name_parts, norm_name, norm_team, position_group
 
-MATCH_METHODS = ("athlete_id", "name_team_season", "name_variant", "unmatched")
+MATCH_METHODS = ("athlete_id", "name_team_season", "name_variant", "nationwide_name",
+                 "unmatched")
 
 # Position groups that may legitimately be the same player across sources
 # (recruiting services and stats disagree on hybrid roles). In name matching
@@ -505,6 +507,52 @@ def apply_transfer_path(players, portal_matches, recruit_portal):
     return players
 
 
+def apply_nationwide_name(players, recruits, stat_players):
+    """Last resort for recruits still unmatched: the same normalized name at
+    ANY team ("nationwide_name").
+
+    Catches recruits whose committedTo is blank or who played somewhere else
+    (e.g. Junior Bergen: no committedTo, Montana WR 2021-2024). With no team to
+    anchor on, every other check is strict:
+      - exactly one player_id nationwide carries that name (any season or position),
+      - its first stat season is not before the class year,
+      - its main position is compatible (no tiebreak leniency here),
+      - the ID is unclaimed, and only one open recruit has that name.
+    Ambiguous and conflict recruits are skipped (they already had candidates).
+    """
+    open_ = (players.recruit_match_method.eq("unmatched")
+             & ~players.ambiguous & ~players.conflict)
+    keys = recruits.assign(recruit_id=recruits.id.astype("string")).set_index(
+        "recruit_id").name_key
+    rec = players.loc[open_, ["recruit_id", "year", "position_group"]].assign(
+        name_key=lambda d: d.recruit_id.map(keys))
+    rec = rec[rec.name_key.fillna("").ne("")]
+
+    named = stat_players[stat_players.name_key.fillna("").ne("")]
+    per_name = named.groupby("name_key").player_id.nunique()
+    by_id = (named.dropna(subset=["stat_position_group"]).groupby("player_id")
+                  .agg(first_season=("stat_season", "min"),
+                       group=("stat_position_group", lambda s: s.mode().iloc[0])))
+    unique = (named[named.name_key.map(per_name).eq(1)]
+              .drop_duplicates("name_key").set_index("name_key").player_id)
+
+    cand = rec.assign(player_id=rec.name_key.map(unique)).dropna(subset=["player_id"])
+    cand = cand.join(by_id, on="player_id").dropna(subset=["first_season"])
+    cand = cand[cand.first_season >= cand.year]
+    cand = cand[_compatible_rows(cand, "position_group", "group")]
+    cand = cand[~cand.player_id.isin(set(players.player_id.dropna()))]
+    cand = cand[cand.groupby("player_id").recruit_id.transform("size").eq(1)]
+
+    new_ids = cand.set_index("recruit_id").player_id
+    hit = players.recruit_id.isin(new_ids.index)
+    players = players.copy()
+    players.loc[hit, "player_id"] = players.loc[hit, "recruit_id"].map(new_ids)
+    players.loc[hit, "person_id"] = players.loc[hit, "player_id"]
+    players.loc[hit, "recruit_match_method"] = "nationwide_name"
+    players.loc[hit, "has_stats"] = True
+    return players
+
+
 def _new_people(rows: pd.DataFrame, stat_players: pd.DataFrame) -> pd.DataFrame:
     """players-table rows for people with no recruit record."""
     out = rows.reindex(columns=PLAYER_COLUMNS)
@@ -537,6 +585,7 @@ def build_crosswalk(recruits: pd.DataFrame, portal: pd.DataFrame,
     recruit_portal = link_recruits_to_portal(recruits, portal)
     players = apply_transfer_path(build_players(recruits, stat_players),
                                   portal_matches, recruit_portal)
+    players = apply_nationwide_name(players, recruits, stat_players)
     players["in_recruits"] = True
 
     # Each portal entry's person. A matched entry belongs to whichever recruit

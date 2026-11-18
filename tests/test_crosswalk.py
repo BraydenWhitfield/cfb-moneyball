@@ -603,3 +603,49 @@ def test_match_portal_uses_variants_at_the_destination():
     ott, smith = portal.portal_key
     assert out.loc[ott, "player_id"] == "1" and out.loc[ott, "match_method"] == "name_variant"
     assert out.loc[smith, "match_method"] == "unmatched"
+
+
+# --- apply_nationwide_name ----------------------------------------------------
+
+def _nationwide(recs, stats):
+    from cfb.crosswalk import apply_nationwide_name
+    return by_recruit(apply_nationwide_name(build_players(recs, stats), recs, stats))
+
+
+def test_nationwide_name_matches_a_unique_name_at_any_team():
+    recs = recruits_df(recruit("r1", "Junior Bergen", team=None, position="WR"))
+    stats = stats_df(stat_line("1", "Junior Bergen", 2021, team="Montana", group="WR"))
+    out = _nationwide(recs, stats)
+    assert out.loc["r1", "player_id"] == "1" and out.loc["r1", "person_id"] == "1"
+    assert out.loc["r1", "recruit_match_method"] == "nationwide_name"
+    assert out.loc["r1", "has_stats"]
+
+
+@pytest.mark.parametrize("extra_lines, rec_kwargs", [
+    # a second ID with the same name anywhere -> not unique
+    ([stat_line("2", "Junior Bergen", 2022, team="Idaho", group="DB")], {}),
+    # first stat season before the class year
+    ([], {"year": 2022}),
+    # incompatible position (no tiebreak leniency without a team)
+    ([], {"position": "QB"}),
+])
+def test_nationwide_name_rejects_weak_evidence(extra_lines, rec_kwargs):
+    recs = recruits_df(recruit("r1", "Junior Bergen", team=None,
+                               **{"position": "WR", **rec_kwargs}))
+    stats = stats_df(stat_line("1", "Junior Bergen", 2021, team="Montana", group="WR"),
+                     *extra_lines)
+    assert _nationwide(recs, stats).loc["r1", "recruit_match_method"] == "unmatched"
+
+
+def test_nationwide_name_skips_claimed_ids_and_duplicate_recruits():
+    # r1 already owns ID 1 via athleteId; r2 has the same name -> no steal.
+    recs = recruits_df(recruit("r1", "Junior Bergen", athlete_id="1", position="WR"),
+                       recruit("r2", "Junior Bergen", team=None, position="WR"))
+    stats = stats_df(stat_line("1", "Junior Bergen", 2021, team="Montana", group="WR"))
+    assert _nationwide(recs, stats).loc["r2", "recruit_match_method"] == "unmatched"
+
+    # two open recruits with the same name -> neither gets the ID
+    recs = recruits_df(recruit("r1", "Junior Bergen", team=None, position="WR"),
+                       recruit("r2", "Junior Bergen", team="Ohio State", position="WR"))
+    out = _nationwide(recs, stats)
+    assert (out.recruit_match_method == "unmatched").all()
