@@ -29,6 +29,30 @@ def norm_name(names: pd.Series) -> pd.Series:
     return s.str.split().str.join(" ").astype("string")
 
 
+def name_parts(names: pd.Series) -> pd.Series:
+    """Like norm_name, but a hyphen splits words instead of joining them, so
+    hyphenated surnames can be compared part by part. Returns token lists.
+
+    "Jacory Croskey-Merritt" -> ["jacory", "croskey", "merritt"].
+    """
+    spaced = names.astype("string").str.replace("-", " ", regex=False)
+    return norm_name(spaced).fillna("").str.split()
+
+
+# Common nickname pairs that are not prefixes (Cam/Cameron needs no entry).
+# Hand-picked and small on purpose: personal nicknames (Woody, Chip, KC) can't
+# be listed, and every entry is a chance for a wrong match.
+NICKNAMES = {
+    "mike": {"michael"}, "mikey": {"michael"}, "jake": {"jacob"}, "joe": {"joseph"},
+    "joey": {"joseph"}, "tony": {"anthony"}, "bill": {"william"}, "billy": {"william"},
+    "bob": {"robert"}, "bobby": {"robert"}, "jim": {"james"}, "jimmy": {"james"},
+    "tom": {"thomas"}, "tommy": {"thomas"}, "andy": {"andrew"}, "drew": {"andrew"},
+    "danny": {"daniel"}, "zack": {"zachary"}, "nate": {"nathan", "nathaniel"},
+    "rick": {"richard"}, "ricky": {"richard"}, "steve": {"steven", "stephen"},
+    "teddy": {"theodore"}, "johnny": {"jonathan"},
+}
+
+
 # --- Teams -----------------------------------------------------------------
 
 # Hand-verified spelling variants -> the name used by the stats/PPA endpoints.

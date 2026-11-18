@@ -181,3 +181,9 @@ def test_clean_recruits_drops_excluded_records():
         "committedTo": [None, "X"], "position": ["RB"] * 2, "stars": [5.0, 3.0],
         "rating": [0.99, 0.85], "ranking": [20.0, 900.0]})
     assert clean_recruits(recruits).name.tolist() == ["Real Guy"]
+
+
+def test_name_parts_splits_hyphens_and_drops_suffixes():
+    from cfb.clean import name_parts
+    out = name_parts(S("Jacory Croskey-Merritt", "Mike Washington Jr.", None))
+    assert out.tolist() == [["jacory", "croskey", "merritt"], ["mike", "washington"], []]

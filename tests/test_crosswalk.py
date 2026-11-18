@@ -533,3 +533,73 @@ def test_merge_split_ids_keeps_apart_different_positions_and_two_recruits():
     assert aliases.empty
     # Without the recruit records, the Williams pair would merge.
     assert len(merge_split_ids(stats)[1]) == 1
+
+
+# --- Name variants ------------------------------------------------------------
+
+def _parts(name):
+    from cfb.clean import name_parts
+    return tuple(name_parts(pd.Series([name])).iloc[0])
+
+
+@pytest.mark.parametrize("a, b", [
+    ("Cam Ward", "Cameron Ward"),                       # prefix
+    ("Mike Washington Jr.", "Michael Washington"),      # nickname table, suffix dropped
+    ("O'Shaan Allison", "O'Shann Allison"),             # first-name spelling
+    ("Jaydn Ott", "Jadyn Ott"),
+    ("Jacory Croskey-Merritt", "Jacory Merritt"),       # one part of a hyphenated surname
+    ("Demie Sumo-Karngbaye", "Demie Sumo"),
+    ("Josh Sterns", "Josh Stearns"),                    # surname spelling, same first name
+    ("Tyler J. Williams", "Tyler Williams"),            # middle initial
+])
+def test_names_are_variants_accepts(a, b):
+    from cfb.crosswalk import names_are_variants
+    assert names_are_variants(_parts(a), _parts(b))
+    assert names_are_variants(_parts(b), _parts(a))
+
+
+@pytest.mark.parametrize("a, b", [
+    ("Jack Smith", "Jake Smith"),        # different first names (0.75 similar)
+    ("John Smith", "Mike Smith"),        # surname alone is not enough
+    ("Joshia Davis", "Joe Davis"),
+    ("Chip Trayanum", "DeaMonte Trayanum"),  # personal nicknames are out of reach
+    ("Josh Sterns", "Jake Stearns"),     # both parts fuzzy
+    ("Madonna", "Madonna"),              # one-word names
+])
+def test_names_are_variants_rejects(a, b):
+    from cfb.crosswalk import names_are_variants
+    assert not names_are_variants(_parts(a), _parts(b))
+
+
+def test_match_by_name_falls_back_to_variants_only_without_exact_candidates():
+    recs = recruits_df(recruit("r1", "Cam Ward"), recruit("r2", "Jake Smith"))
+    stats = stats_df(stat_line("1", "Cameron Ward", 2022),
+                     stat_line("2", "Jake Smith", 2022),
+                     stat_line("3", "Jakob Smith", 2022))   # variant, but r2 has an exact match
+    out = by_recruit(match_recruits_by_name(recs, stats))
+    assert out.loc["r1", "player_id"] == "1" and out.loc["r1", "match_method"] == "name_variant"
+    assert out.loc["r2", "player_id"] == "2" and out.loc["r2", "match_method"] == "name_team_season"
+
+
+def test_variant_loses_to_exact_match_for_the_same_id():
+    names = pd.DataFrame({"recruit_id": ["r1", "r2"], "player_id": ["9", "9"],
+                          "match_method": ["name_team_season", "name_variant"],
+                          "ambiguous": [False, False]}).astype({"player_id": "string"})
+    ids = pd.DataFrame({"recruit_id": pd.Series([], dtype="string"),
+                        "player_id": pd.Series([], dtype="string"),
+                        "match_method": pd.Series([], dtype="string"),
+                        "has_stats": pd.Series([], dtype=bool)})
+    out = by_recruit(resolve_conflicts(ids, names))
+    assert out.loc["r1", "player_id"] == "9" and not out.loc["r1", "conflict"]
+    assert pd.isna(out.loc["r2", "player_id"]) and out.loc["r2", "conflict"]
+
+
+def test_match_portal_uses_variants_at_the_destination():
+    from cfb.crosswalk import match_portal
+    portal = portal_df(portal_entry("Jaydn", "Ott"), portal_entry("Jake", "Smith"))
+    stats = stats_df(stat_line("1", "Jadyn Ott", 2023, team="Texas Tech", group="RB"),
+                     stat_line("2", "Jack Smith", 2023, team="Texas Tech", group="RB"))
+    out = match_portal(portal, stats).set_index("portal_key")
+    ott, smith = portal.portal_key
+    assert out.loc[ott, "player_id"] == "1" and out.loc[ott, "match_method"] == "name_variant"
+    assert out.loc[smith, "match_method"] == "unmatched"

@@ -11,17 +11,22 @@ Key fact: recruit `athleteId`, stats `playerId`, PPA `id`, and draft
 ID when known, else "rec:<recruit id>", "portal:<portal_key>", or
 "draft:<year>-<overall>".
 
-match_method: "athlete_id", "name_team_season", or "unmatched".
+match_method: "athlete_id"; "name_team_season" (exact normalized name, same
+team, season window); "name_variant" (same team and window, close name - see
+names_are_variants); or "unmatched".
 Matching never guesses: when a rule finds more than one candidate the row is
 left unmatched and flagged (`ambiguous`), and one player_id never belongs to
 two recruits (`conflict`).
 """
 
+from difflib import SequenceMatcher
+from functools import lru_cache
+
 import pandas as pd
 
-from cfb.clean import norm_name, norm_team, position_group
+from cfb.clean import NICKNAMES, name_parts, norm_name, norm_team, position_group
 
-MATCH_METHODS = ("athlete_id", "name_team_season", "unmatched")
+MATCH_METHODS = ("athlete_id", "name_team_season", "name_variant", "unmatched")
 
 # Position groups that may legitimately be the same player across sources
 # (recruiting services and stats disagree on hybrid roles). In name matching
@@ -205,9 +210,75 @@ def _summarize_candidates(candidates, left_key, method):
     }).reset_index(drop=True)
 
 
+# --- Name variants -------------------------------------------------------------
+
+FIRST_NAME_SIMILARITY = 0.8   # Jaydn/Jadyn, Kaden/Caden pass; Jake/Jack (0.75) does not
+SURNAME_SIMILARITY = 0.85     # Sterns/Stearns (0.92)
+
+
+def _first_names_compatible(a: str, b: str) -> bool:
+    """Equal, a prefix of 3+ letters (Cam/Cameron), a NICKNAMES pair
+    (Mike/Michael), or at least FIRST_NAME_SIMILARITY similar (Jaydn/Jadyn)."""
+    if a == b:
+        return True
+    short, long_ = sorted((a, b), key=len)
+    if len(short) >= 3 and long_.startswith(short):
+        return True
+    if long_ in NICKNAMES.get(short, ()):
+        return True
+    return SequenceMatcher(None, a, b).ratio() >= FIRST_NAME_SIMILARITY
+
+
+@lru_cache(maxsize=None)
+def names_are_variants(a: tuple, b: tuple) -> bool:
+    """Could two name_parts token tuples be the same person?
+
+    One part must agree exactly and the other closely:
+      - a shared surname word of 3+ letters (any part of a hyphenated or
+        multi-word surname: Croskey-Merritt / Merritt) and compatible first
+        names (_first_names_compatible); or
+      - the same first name and surnames at least SURNAME_SIMILARITY similar.
+    Only used at the same team and season window, for one unique candidate.
+    """
+    if len(a) < 2 or len(b) < 2:
+        return False
+    shared = {t for t in a[1:] if len(t) >= 3} & set(b[1:])
+    if shared and _first_names_compatible(a[0], b[0]):
+        return True
+    return (a[0] == b[0] and SequenceMatcher(None, "".join(a[1:]), "".join(b[1:])).ratio()
+            >= SURNAME_SIMILARITY)
+
+
+def _variant_candidates(left: pd.DataFrame, names: pd.Series, team_col: str,
+                        stat_players: pd.DataFrame) -> pd.DataFrame:
+    """Rows of `left` x stat lines at the same team whose names are variants.
+
+    Pairs are pre-filtered ("blocked") on a shared surname word or the same
+    first name, then checked with names_are_variants.
+    """
+    def blocks(parts):
+        return [w for w in parts[1:] if len(w) >= 3] + (["^" + parts[0]] if parts else [])
+
+    lp = name_parts(names).map(tuple)
+    left = left.assign(_parts=lp.to_numpy(), _block=lp.map(blocks).to_numpy())
+    sp = name_parts(stat_players.player_name).map(tuple)
+    stats = stat_players.drop(columns="name_key").assign(
+        _sparts=sp.to_numpy(), _block=sp.map(blocks).to_numpy())
+    pairs = (left.explode("_block").dropna(subset=["_block"])
+                 .merge(stats.explode("_block").dropna(subset=["_block"]),
+                        left_on=[team_col, "_block"], right_on=["team", "_block"]))
+    pairs = pairs.drop(columns="_block")
+    ok = [names_are_variants(a, b) for a, b in zip(pairs._parts, pairs._sparts)]
+    pairs = pairs[pd.Series(ok, index=pairs.index, dtype=bool)]
+    pairs = pairs.drop(columns=["_parts", "_sparts"])
+    # A pair blocked on two shared words appears twice.
+    return pairs.loc[~pairs.astype("string").duplicated()].reset_index(drop=True)
+
+
 def match_recruits_by_name(recruits: pd.DataFrame, stat_players: pd.DataFrame) -> pd.DataFrame:
     """Name fallback: same normalized name, team == committedTo, stat season >=
-    class year. Position only breaks ties (_position_tiebreak).
+    class year. Position only breaks ties (_position_tiebreak). Recruits with
+    no exact-name candidate then try name variants ("name_variant").
 
     Applies to recruits with no athleteId AND to recruits whose athleteId never
     appears on the field (possibly a stale/duplicate ID - see resolve_conflicts).
@@ -219,7 +290,14 @@ def match_recruits_by_name(recruits: pd.DataFrame, stat_players: pd.DataFrame) -
                        right_on=["name_key", "team"])
     cand = cand[cand.stat_season >= cand.year]
     cand = _position_tiebreak(cand, "recruit_id", "position_group", "stat_position_group")
-    return _summarize_candidates(cand, "recruit_id", "name_team_season")
+
+    rest = no_id[~no_id.recruit_id.isin(set(cand.recruit_id))]
+    var = _variant_candidates(rest, rest["name"], "committedTo", stat_players)
+    var = var[var.stat_season >= var.year]
+    var = _position_tiebreak(var, "recruit_id", "position_group", "stat_position_group")
+    return pd.concat([_summarize_candidates(cand, "recruit_id", "name_team_season"),
+                      _summarize_candidates(var, "recruit_id", "name_variant")],
+                     ignore_index=True)
 
 
 def resolve_conflicts(id_matches: pd.DataFrame, name_matches: pd.DataFrame) -> pd.DataFrame:
@@ -237,6 +315,15 @@ def resolve_conflicts(id_matches: pd.DataFrame, name_matches: pd.DataFrame) -> p
     ids = id_matches.assign(ambiguous=False, conflict=False, replaced_athlete_id=pd.NA)
     names = name_matches.assign(has_stats=~name_matches.ambiguous.astype(bool), conflict=False,
                                 replaced_athlete_id=pd.NA)
+
+    # A variant match loses to an exact name match for the same player_id
+    # (instead of both being dropped).
+    exact_ids = set(names.loc[names.match_method.eq("name_team_season"), "player_id"].dropna())
+    beaten = names.match_method.eq("name_variant") & names.player_id.isin(exact_ids)
+    names.loc[beaten, "player_id"] = pd.NA
+    names.loc[beaten, "match_method"] = "unmatched"
+    names.loc[beaten, "has_stats"] = False
+    names.loc[beaten, "conflict"] = True
 
     claimed_by_id = set(ids.player_id.dropna())
     has_pid = names.player_id.notna()
@@ -319,9 +406,13 @@ DESTINATION_WINDOW = (0, 1)
 ORIGIN_WINDOW = (-2, -1)
 
 
-def _portal_candidates(portal, stat_players, team_col, window, side):
-    cand = portal.merge(stat_players, left_on=["name_key", team_col],
-                        right_on=["name_key", "team"])
+def _portal_candidates(portal, stat_players, team_col, window, side, variant=False):
+    if variant:
+        cand = _variant_candidates(portal, portal.firstName + " " + portal.lastName, team_col,
+                                   stat_players)
+    else:
+        cand = portal.merge(stat_players, left_on=["name_key", team_col],
+                            right_on=["name_key", "team"])
     offset = cand.stat_season - cand.season
     cand = cand[(offset >= window[0]) & (offset <= window[1])]
     return cand[["portal_key", "player_id", "position_group", "stat_position_group"]].assign(
@@ -334,16 +425,25 @@ def match_portal(portal: pd.DataFrame, stat_players: pd.DataFrame) -> pd.DataFra
     Searches the destination (stat season within DESTINATION_WINDOW) and the
     origin (ORIGIN_WINDOW) by name + team; position only breaks ties. One
     distinct player across both sides -> matched; several -> ambiguous.
-    Portal rows carry no IDs, so match_method is "name_team_season" or "unmatched".
+    Entries with no exact-name candidate then try name variants.
+    Portal rows carry no IDs, so match_method is "name_team_season",
+    "name_variant", or "unmatched".
     match_side: "destination", "origin", "both", or <NA>.
     """
-    cand = pd.concat([
-        _portal_candidates(portal, stat_players, "destination", DESTINATION_WINDOW,
-                           "destination"),
-        _portal_candidates(portal, stat_players, "origin", ORIGIN_WINDOW, "origin"),
-    ], ignore_index=True)
-    cand = _position_tiebreak(cand, "portal_key", "position_group", "stat_position_group")
-    summary = _summarize_candidates(cand, "portal_key", "name_team_season")
+    def candidates(rows, variant):
+        cand = pd.concat([
+            _portal_candidates(rows, stat_players, "destination", DESTINATION_WINDOW,
+                               "destination", variant),
+            _portal_candidates(rows, stat_players, "origin", ORIGIN_WINDOW, "origin", variant),
+        ], ignore_index=True)
+        return _position_tiebreak(cand, "portal_key", "position_group", "stat_position_group")
+
+    exact = candidates(portal, variant=False)
+    var = candidates(portal[~portal.portal_key.isin(set(exact.portal_key))], variant=True)
+    cand = pd.concat([exact, var], ignore_index=True)
+    summary = pd.concat([_summarize_candidates(exact, "portal_key", "name_team_season"),
+                         _summarize_candidates(var, "portal_key", "name_variant")],
+                        ignore_index=True)
     sides = (cand.drop_duplicates(["portal_key", "side"]).groupby("portal_key").side
                  .agg(lambda s: "both" if len(s) == 2 else s.iloc[0]))
     summary["match_side"] = (summary.portal_key.map(sides)
