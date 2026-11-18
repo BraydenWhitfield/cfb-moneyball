@@ -452,3 +452,57 @@ def test_main_end_to_end_writes_outputs(tmp_path):
     assert players.loc["8", "recruit_id"] == "r2" and players.loc["8", "via_portal"]
     assert players.loc["8", "athlete_id_placeholder"]
     assert links.person_id.tolist() == ["8"]
+
+
+# --- merge_split_ids --------------------------------------------------------
+
+def test_merge_split_ids_merges_one_person_split_across_seasons():
+    from cfb.crosswalk import merge_split_ids
+    stats = stats_df(stat_line("1", "Kevric Wiggins", 2022, team="Jackson State", group="WR"),
+                     stat_line("2", "Kevric Wiggins", 2023, team="Jackson State", group="WR"),
+                     stat_line("2", "Kevric Wiggins", 2024, team="Jackson State", group="WR"),
+                     stat_line("9", "Someone Else", 2022, team="Jackson State"))
+    out, aliases = merge_split_ids(stats)
+    assert aliases[["player_id", "canonical_id"]].values.tolist() == [["1", "2"]]
+    assert set(out.player_id) == {"2", "9"} and len(out) == 4
+
+
+def test_merge_split_ids_keeps_namesakes_who_overlap_or_are_far_apart():
+    from cfb.crosswalk import merge_split_ids
+    stats = stats_df(
+        # same season -> two people on one roster
+        stat_line("1", "Aaron Young", 2024, team="Old Dominion"),
+        stat_line("2", "Aaron Young", 2024, team="Old Dominion"),
+        # two empty seasons between them -> treated as different people
+        stat_line("3", "Jordan Brown", 2021, team="Fresno State"),
+        stat_line("4", "Jordan Brown", 2024, team="Fresno State"),
+        # same name, different teams -> not this rule
+        stat_line("5", "Trey Adkins", 2021, team="South Carolina"),
+        stat_line("6", "Trey Adkins", 2022, team="Mercer"))
+    out, aliases = merge_split_ids(stats)
+    assert aliases.empty and out.player_id.nunique() == 6
+
+
+def test_apply_aliases_maps_only_retired_ids():
+    from cfb.crosswalk import apply_aliases
+    aliases = pd.DataFrame({"player_id": ["1"], "canonical_id": ["2"]}, dtype="string")
+    assert apply_aliases(pd.Series(["1", "3"], dtype="string"), aliases).tolist() == ["2", "3"]
+
+
+def test_apply_aliases_with_no_aliases_keeps_ids_as_strings():
+    from cfb.crosswalk import apply_aliases
+    empty = pd.DataFrame({"player_id": [], "canonical_id": []}, dtype="string")
+    assert apply_aliases(pd.Series(["7"], dtype="string"), empty).tolist() == ["7"]
+
+
+def test_merge_split_ids_keeps_apart_different_positions_and_two_recruits():
+    from cfb.crosswalk import merge_split_ids
+    stats = stats_df(
+        stat_line("1", "Daniel Jackson", 2024, team="Minnesota", group="WR"),
+        stat_line("2", "Daniel Jackson", 2025, team="Minnesota", group="ST"),
+        stat_line("3", "Tyler Williams", 2023, team="Georgia", group="WR"),
+        stat_line("4", "Tyler Williams", 2024, team="Georgia", group="WR"))
+    out, aliases = merge_split_ids(stats, recruit_ids=["3", "4"])
+    assert aliases.empty
+    # Without the recruit records, the Williams pair would merge.
+    assert len(merge_split_ids(stats)[1]) == 1

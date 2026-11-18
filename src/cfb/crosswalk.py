@@ -3,6 +3,7 @@
 Run `python -m cfb.crosswalk` to write data/processed/:
   players.parquet       one row per person (person_id)
   portal_links.parquet  one row per portal entry, with its person_id
+  id_aliases.parquet    split player_ids merged into one (see merge_split_ids)
   coverage.txt          match rates by source
 
 Key fact: recruit `athleteId`, stats `playerId`, PPA `id`, and draft
@@ -57,6 +58,89 @@ def build_stat_players(stats: pd.DataFrame, ppa: pd.DataFrame | None = None) -> 
     out["name_key"] = norm_name(out.player_name)
     out["stat_position_group"] = position_group(out.stat_position)
     return out
+
+
+# Most empty seasons allowed between two IDs that get merged (a redshirt or
+# injury year). Bigger gaps at one school were common names, e.g. two different
+# "Jordan Brown"s at Fresno State in 2021 and 2024-2025.
+MAX_SPLIT_GAP = 1
+
+
+def merge_split_ids(stat_players: pd.DataFrame, recruit_ids=()):
+    """Merge player_ids that are one person split in two by the stats feed.
+
+    Two or more IDs are merged when they share a normalized name and a team,
+    never appear in the same season (anywhere), leave at most MAX_SPLIT_GAP
+    empty seasons between them, and have compatible positions. Example: Kevric
+    Wiggins at Jackson State is one ID in 2022 and another in 2023-2024.
+
+    `recruit_ids`: athleteIds of recruit records. Two of them never merge,
+    because two recruit records are two people (e.g. Daniel Jackson, a 2020 WR,
+    and Daniel Jackson, a 2025 K, both at Minnesota).
+
+    The canonical ID is the one with the most seasons (ties: earliest season,
+    then smallest ID). Returns (stat_players with canonical IDs, aliases), where
+    aliases has one row per retired ID: player_id, canonical_id, name_key, team.
+    Apply the aliases to every other table keyed by player_id.
+    """
+    seasons = stat_players.groupby("player_id").stat_season.agg(frozenset)
+    main_group = (stat_players.dropna(subset=["stat_position_group"])
+                              .groupby("player_id").stat_position_group
+                              .agg(lambda s: s.mode().iloc[0]))
+    recruit_ids = set(pd.Series(list(recruit_ids), dtype="string").dropna())
+    named = stat_players[stat_players.name_key.fillna("").ne("")]
+    groups = named.groupby(["name_key", "team"]).player_id.unique()
+    groups = groups[groups.map(len) > 1]
+
+    def mergeable(ids):
+        sets = [seasons[i] for i in ids]
+        years = sorted(frozenset().union(*sets))
+        disjoint = sum(map(len, sets)) == len(years)
+        close = all(b - a <= MAX_SPLIT_GAP + 1 for a, b in zip(years, years[1:]))
+        groups_ = [main_group.get(i) for i in ids]
+        positions = all(positions_compatible(a, b) for a in groups_ for b in groups_)
+        one_recruit = sum(i in recruit_ids for i in ids) <= 1
+        return disjoint and close and positions and one_recruit
+
+    # Union-find over the qualifying groups (an ID can sit in two groups if it
+    # played at two teams); each finished component is re-checked as a whole.
+    parent = {}
+
+    def find(x):
+        while parent.setdefault(x, x) != x:
+            x = parent[x]
+        return x
+
+    for ids in groups:
+        if mergeable(ids):
+            for other in ids[1:]:
+                parent[find(other)] = find(ids[0])
+    components = {}
+    for pid in list(parent):
+        components.setdefault(find(pid), []).append(pid)
+
+    alias_rows = []
+    for ids in components.values():
+        if len(ids) < 2 or not mergeable(ids):
+            continue
+        canonical = min(ids, key=lambda i: (-len(seasons[i]), min(seasons[i]), i))
+        alias_rows += [(i, canonical) for i in ids if i != canonical]
+    aliases = pd.DataFrame(alias_rows, columns=["player_id", "canonical_id"], dtype="string")
+    first = named.drop_duplicates("player_id").set_index("player_id")
+    aliases["name_key"] = aliases.player_id.map(first.name_key).astype("string")
+    aliases["team"] = aliases.player_id.map(first.team).astype("string")
+
+    out = stat_players.assign(player_id=apply_aliases(stat_players.player_id, aliases))
+    out = out.drop_duplicates(["player_id", "stat_season", "team"]).reset_index(drop=True)
+    return out, aliases
+
+
+def apply_aliases(ids: pd.Series, aliases: pd.DataFrame) -> pd.Series:
+    """Replace retired player_ids with their canonical ID (others unchanged)."""
+    ids = ids.astype("string")
+    mapping = dict(zip(aliases.player_id, aliases.canonical_id))
+    retired = ids.isin(mapping)
+    return ids.where(~retired, ids[retired].map(mapping)).astype("string")
 
 
 # --- Recruits -> players ------------------------------------------------------
@@ -455,17 +539,30 @@ def _tidy_types(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def build_all(raw_dir=None):
-    """Load raw data, clean it, and build (players, portal_links, stat_players)."""
+def build_all(raw_dir=None, return_aliases=False):
+    """Load raw data, clean it, and build (players, portal_links, stat_players).
+
+    Split IDs are merged first (merge_split_ids), and recruit / draft IDs are
+    mapped to the canonical ones. With return_aliases=True a 4th item, the
+    alias table, is returned (production tables need the same mapping).
+    """
     from cfb import clean, load
     kw = {} if raw_dir is None else {"raw_dir": raw_dir}
     recruits = clean.clean_recruits(load.load_recruits(**kw))
     portal = clean.clean_portal(load.load_portal(**kw))
     ppa = clean.combine_ppa_splits(clean.dedupe_player_seasons(load.load_ppa(**kw)))
-    stat_players = build_stat_players(load.load_stats(**kw), ppa)
+    stat_players, aliases = merge_split_ids(build_stat_players(load.load_stats(**kw), ppa),
+                                            recruit_ids=recruits.athleteId.dropna())
+    has_id = recruits.athleteId.notna()
+    recruits.loc[has_id, "athleteId"] = apply_aliases(recruits.loc[has_id, "athleteId"], aliases)
+    draft = load.load_draft(**kw)
+    has_id = draft.collegeAthleteId.notna()
+    draft.loc[has_id, "collegeAthleteId"] = apply_aliases(draft.loc[has_id, "collegeAthleteId"],
+                                                          aliases)
     players, portal_links = build_crosswalk(recruits, portal, stat_players)
-    players = attach_draft(players, load.load_draft(**kw), stat_players)
-    return _tidy_types(players), _tidy_types(portal_links), stat_players
+    players = attach_draft(players, draft, stat_players)
+    out = _tidy_types(players), _tidy_types(portal_links), stat_players
+    return out + (aliases,) if return_aliases else out
 
 
 def coverage_report(players: pd.DataFrame, portal_links: pd.DataFrame) -> str:
@@ -519,10 +616,11 @@ def main(out_dir=None, raw_dir=None):
     from cfb.client import PROJECT_ROOT
     out = PROJECT_ROOT / "data" / "processed" if out_dir is None else Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    players, portal_links, _ = build_all(raw_dir)
+    players, portal_links, _, aliases = build_all(raw_dir, return_aliases=True)
     players.to_parquet(out / "players.parquet", index=False)
     portal_links.to_parquet(out / "portal_links.parquet", index=False)
-    report = coverage_report(players, portal_links)
+    aliases.to_parquet(out / "id_aliases.parquet", index=False)
+    report = coverage_report(players, portal_links) + f"\n\nsplit IDs merged: {len(aliases)}"
     (out / "coverage.txt").write_text(report + "\n", encoding="utf-8")
     print(report)
     print(f"\nWrote players.parquet, portal_links.parquet, coverage.txt to {out}")
