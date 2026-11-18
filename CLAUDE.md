@@ -41,7 +41,7 @@ I'm a student building this to learn and to show interviewers.
 - `src/cfb/handcheck.py`: `python -m cfb.handcheck sample|summarize`.
   `annotations/handcheck_v1.csv` is labeled (100 rows; Claude's suggested verdicts are
   kept in separate columns, `verdict` holds the final labels).
-- Tests: 95 passing (`pytest`). Setup: `pip install -r requirements.txt` (includes `-e .`).
+- Tests: 97 passing (`pytest`). Setup: `pip install -r requirements.txt` (includes `-e .`).
 
 ### Key decisions
 - Market price = `rating` (continuous), not `ranking`. `ranking` is a national rank by
@@ -78,7 +78,10 @@ I'm a student building this to learn and to show interviewers.
   the other close (shared surname word + prefix/nickname/0.8 first name, or same first name
   + 0.85 surname). Exact beats variant for the same ID.
 - nationwide_name: name unique among all stat lines, first season >= class year,
-  compatible position, unclaimed. Lower confidence; filterable by its tag.
+  compatible position, unclaimed. Lower confidence: EXCLUDED from the main analysis by
+  default via `cfb.processed.load_players()` / `load_portal_links()`
+  (`include_nationwide=True` for the robustness check). Excluded recruits are dropped,
+  not counted as busts; their portal links lose the recruit link (`nationwide_dependent`).
 - Split IDs merged: same name + team, no shared season, at most 1 empty season between,
   compatible positions, and not two different recruits' athleteIds (26 merged).
   Production tables must be remapped with `id_aliases.parquet`.
