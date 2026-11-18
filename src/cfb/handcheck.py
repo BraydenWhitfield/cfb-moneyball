@@ -169,8 +169,17 @@ def summarize(path=DEFAULT_PATH) -> str:
         raise ValueError(f"Unknown verdicts in rows {bad.sample_id.tolist()}: "
                          f"{sorted(set(bad.verdict))}. Use one of {VERDICTS}.")
 
+    # Records later found not to be real recruits leave both the sample and
+    # their stratum's population count.
+    from cfb.clean import EXCLUDED_RECRUITS
+    keys = df["key"].astype(str) if "key" in df else pd.Series("", index=df.index)
+    gone = df.source.eq("recruit") & keys.isin(EXCLUDED_RECRUITS)
+    df["stratum_population"] -= df.stratum.map(df[gone].stratum.value_counts()).fillna(0).astype(int)
+    df = df[~gone]
+
     lines = [f"{path}: {len(df)} rows, {df.verdict.ne('').sum()} labeled "
-             f"({df.verdict.eq('unsure').sum()} unsure, excluded from rates)"]
+             f"({df.verdict.eq('unsure').sum()} unsure, excluded from rates)"
+             + (f"; {int(gone.sum())} excluded record(s) dropped" if gone.any() else "")]
     labeled = df[df.verdict.isin(["bust", "failed_join"])].assign(
         failed=lambda d: d.verdict.eq("failed_join"))
     if labeled.empty:

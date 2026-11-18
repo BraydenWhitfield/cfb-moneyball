@@ -105,8 +105,19 @@ def market_tier(stars: pd.Series) -> pd.Series:
 
 # --- Dataset cleaners ------------------------------------------------------
 
+# Recruit records that are not real recruits, by recruit `id`. Hand-verified,
+# like TEAM_ALIASES. Honorary ratings have no reliable signature in the data
+# (missing hometown and round ratings also occur on real players), so this
+# stays an explicit list.
+EXCLUDED_RECRUITS = {
+    "216935": "Tate Myre (2023): honorary 5-star rating, never a real recruit",
+}
+
+
 def clean_recruits(recruits: pd.DataFrame) -> pd.DataFrame:
     df = recruits.copy()
+    if "id" in df:
+        df = df[~df.id.astype("string").isin(EXCLUDED_RECRUITS)].copy()
     # Negative athleteIds (646 rows, 2017-2019 classes) are placeholders, not real
     # CFBD IDs: treat them as missing so the name fallback gets a chance.
     if "athleteId" not in df:

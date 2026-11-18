@@ -173,3 +173,11 @@ def test_clean_recruits_treats_negative_athlete_ids_as_placeholders():
     out = clean_recruits(recruits)
     assert out.athlete_id_placeholder.tolist() == [True, False]
     assert pd.isna(out.athleteId.iloc[0]) and out.athleteId.iloc[1] == "4428852"
+
+
+def test_clean_recruits_drops_excluded_records():
+    recruits = pd.DataFrame({
+        "id": [216935, 1], "year": [2023] * 2, "name": ["Tate Myre", "Real Guy"],
+        "committedTo": [None, "X"], "position": ["RB"] * 2, "stars": [5.0, 3.0],
+        "rating": [0.99, 0.85], "ranking": [20.0, 900.0]})
+    assert clean_recruits(recruits).name.tolist() == ["Real Guy"]

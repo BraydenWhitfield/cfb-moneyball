@@ -112,3 +112,15 @@ def test_sample_command_refuses_to_overwrite_labels(tmp_path):
     with pytest.raises(SystemExit, match="exists"):
         main(["sample", "--out", str(path)])
     assert path.read_text(encoding="utf-8") == "my precious labels"
+
+
+def test_summarize_drops_excluded_records_from_sample_and_population(tmp_path):
+    path = tmp_path / "hc.csv"
+    pd.DataFrame({
+        "sample_id": [1, 2, 3], "source": ["recruit"] * 3, "key": ["216935", "5", "6"],
+        "position_group": ["RB"] * 3, "stratum": ["recruit|RB|4-5"] * 3,
+        "stratum_population": [10] * 3, "verdict": ["bust", "bust", "failed_join"],
+    }).to_csv(path, index=False, encoding="utf-8-sig")
+    text = summarize(path)
+    assert "2 rows, 2 labeled" in text and "1 excluded record(s) dropped" in text
+    assert "1/2 failed joins" in text
