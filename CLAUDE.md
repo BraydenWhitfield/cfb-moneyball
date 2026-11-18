@@ -30,8 +30,8 @@ I'm a student building this to learn and to show interviewers.
   `calls_remaining` from the `X-CallLimit-Remaining` header. Free tier: 1,000 calls/month.
 - `src/cfb/fetch.py`: `python -m cfb.fetch [--run] [--years ...]`. Dry run by default,
   skips cached files, stops below a quota floor. The full pull is done (about 40 calls):
-  recruits 2017-2025, portal / season PPA / usage (with and without garbage time) /
-  season stats for 2021-2025, draft 2021-2026.
+  recruits 2017-2025, portal / season PPA (all plays only) / usage (with and without
+  garbage time) / season stats for 2021-2025, draft 2021-2026. No team-level stats.
 - `notebooks/01_explore.ipynb`: data exploration and matching findings (section 6).
 - `src/cfb/load.py`: cached JSON -> DataFrames, with ID columns as strings.
 - `src/cfb/clean.py`: name/team normalization, position map, dedupes, PPA/usage split merge.
@@ -41,7 +41,14 @@ I'm a student building this to learn and to show interviewers.
 - `src/cfb/handcheck.py`: `python -m cfb.handcheck sample|summarize`.
   `annotations/handcheck_v1.csv` is labeled (100 rows; Claude's suggested verdicts are
   kept in separate columns, `verdict` holds the final labels).
-- Tests: 97 passing (`pytest`). Setup: `pip install -r requirements.txt` (includes `-e .`).
+- `src/cfb/processed.py`: loads crosswalk outputs with the sample rules (nationwide_name off
+  by default).
+- `src/cfb/production.py`: player-season plays, level, replacement level, PPA above
+  replacement (PAR), FCS->FBS exchange rate, roles.
+- `src/cfb/master.py`: `python -m cfb.master` writes `data/processed/master.parquet` (one row
+  per acquisition), `master_with_nationwide.parquet` (robustness), `master_report.txt`.
+  8,478 rows: 5,322 recruits (2021-25 classes), 3,156 transfers (2021-25), QB/RB/WR.
+- Tests: 111 passing (`pytest`). Setup: `pip install -r requirements.txt` (includes `-e .`).
 
 ### Key decisions
 - Market price = `rating` (continuous), not `ranking`. `ranking` is a national rank by
@@ -86,6 +93,31 @@ I'm a student building this to learn and to show interviewers.
   compatible positions, and not two different recruits' athleteIds (26 merged).
   Production tables must be remapped with `id_aliases.parquet`.
 
+### Target and master table (decided 2026-11-18)
+- Grain: one row per acquisition. Recruit (2021-25 class, team = committedTo) or transfer
+  (portal entry 2021-25 with a destination, not withdrawn / gone pro, team = destination).
+- Outcome A (main): `par_window` = FBS-equivalent PPA above replacement, summed over 3
+  seasons (recruits) or 2 (transfers), credited at ANY team; `par_window_at_team` too.
+  No stat line -> 0. Use `window_complete` rows for training (recruits 2021-23 classes,
+  transfers 2021-24).
+- Outcome B (secondary): `tier_window` 0 none / 1 rotation / 2 starter. Outcome C (side
+  check): `drafted_after`, valid where `draft_observable`.
+- Plays: implied plays (totalPPA / averagePPA, |avg| >= 0.05; 90% of rows), else box score
+  ATT + CAR + REC x per-position calibration. Usage share x team plays was worse at every
+  position, WR included (log-corr 0.78 vs 0.94), so it is not used.
+- Season position from the play mix (25+ pass attempts = QB), since PPA position labels
+  can come from another season.
+- Replacement = 20th percentile PPA/play among regulars (QB 100, RB 50, WR/TE 20 plays),
+  per position, season, level. D2/NAIA seasons = 0.
+- FCS -> FBS exchange rate estimated from 176 level movers: k = 0.48 (95% CI 0.35-0.62),
+  likely biased low (both directions select on an extreme season). Fallback 0.5 if < 50
+  movers or CI reaches 0.
+- Unmatched transfers are kept at 0 with `unmatched`; robustness check drops them.
+  Transfer `prior_*` features are NaN for unmatched entries and for 2021 (no 2020 data).
+- First look (complete windows): Spearman(market_rating, par_window) = 0.23 for recruits
+  and 0.24 for transfers; stable when dropping unmatched transfers (0.22) or adding
+  nationwide_name (0.23).
+
 ### Coverage (from coverage.txt; before hand-check fixes in parentheses)
 - Recruits from the 2021-2025 classes with any stat line: QB 51.7% (48.2), RB 65.8% (62.4),
   WR 60.5% (58.0).
@@ -102,5 +134,8 @@ I'm a student building this to learn and to show interviewers.
 - 154 `link_conflict`s remain.
 - nationwide_name precision is only spot-checked (common names like Trey Adams are
   uncertain). Consider a second hand-check sample of matched rows.
-- Not yet decided: target definition for the model, how to price transfers with no rating,
-  and how to handle recent classes with few seasons observed (censoring).
+- Unrated recruits average more PAR than 3-stars (7.1 vs 6.2, complete windows). Check
+  who they are (JUCO / late signees?) before modeling.
+- 300 unmatched transfers to FBS/FCS teams are scored 0 though ~30% may have played.
+- Not yet decided: feature set, model choice, validation scheme, how to price transfers
+  with no rating (`market_unrated` is a flag for now).
