@@ -134,8 +134,25 @@ I'm a student building this to learn and to show interviewers.
 - 154 `link_conflict`s remain.
 - nationwide_name precision is only spot-checked (common names like Trey Adams are
   uncertain). Consider a second hand-check sample of matched rows.
-- Unrated recruits average more PAR than 3-stars (7.1 vs 6.2, complete windows). Check
-  who they are (JUCO / late signees?) before modeling.
 - 300 unmatched transfers to FBS/FCS teams are scored 0 though ~30% may have played.
-- Not yet decided: feature set, model choice, validation scheme, how to price transfers
-  with no rating (`market_unrated` is a flag for now).
+- Unrated-vs-3-star FCS edge (+2.6 PAR, CI 0.1-5.2) is a hypothesis, tested via the
+  `unrated_fcs` feature out of time; not a finding.
+
+### Modeling (decided 2026-11-18; code in `src/cfb/modeling/`)
+- Unrated recruits looked better than 3-stars (7.1 vs 6.2) because of SELECTION: unrated
+  records are added in bulk after signing (IDs in one late block, no ranking), mostly
+  FCS / academy / Ivy signing lists, so every one has a school. 13.5% of 3-stars never
+  signed with a covered school and score 0. With a school: 3-star 7.19 vs unrated 7.10.
+- So the recruit model population DROPS recruits with no committedTo (nobody acquired
+  them): 559 complete-window rows.
+- Separate models for recruits (train 2021-22 classes, test 2023) and transfers (train
+  2021-23, test 2024). Complete windows only. Squared-error loss (target can be negative,
+  so no Tweedie).
+- Feature sets: baseline = rating + unrated + position (transfers add stars and
+  rating_missing: ~40% of rated transfers have stars but no rating); baseline_plus = +
+  acquiring level (the main test); full = + all signing-time features. No class year.
+- Same learner across feature sets (ridge, then LightGBM), tuned by grouped CV on
+  person_id inside the training years. Test year scored once.
+- Metrics: Spearman (pooled and within position) and within-tier top-20% lift (tiers 2,
+  3, 4-5, unrated), bootstrap CIs and paired full-minus-baseline differences.
+  Transfers reported on all test rows, new players only, and matched only.
