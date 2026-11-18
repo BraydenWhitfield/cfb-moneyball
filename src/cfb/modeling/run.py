@@ -12,11 +12,12 @@ import pandas as pd
 
 from cfb.modeling.data import FEATURE_SETS, TARGET, load_master, population, split, test_variants
 from cfb.modeling.evaluate import evaluate, tier_lifts
+from cfb.modeling.gbm import LGBMModel
 from cfb.modeling.linear import RidgeModel
 from cfb.processed import PROCESSED_DIR
 
 OUT_DIR = PROCESSED_DIR / "models"
-LEARNERS = {"ridge": RidgeModel}
+LEARNERS = {"ridge": RidgeModel, "lgbm": LGBMModel}
 SETS = ["baseline", "baseline_plus", "full"]
 
 
@@ -55,6 +56,8 @@ def run(n_boot=1000):
         for name, model in models.items():
             if hasattr(model, "alpha"):
                 lines.append(f"{name}: alpha {model.alpha:g}")
+            if hasattr(model, "describe"):
+                lines.append(f"{name}: {model.describe()}")
         if "ridge:full" in models:
             coefs = models["ridge:full"].coefficients().head(15)
             lines += ["", "ridge:full standardized coefficients (top 15 by size):",

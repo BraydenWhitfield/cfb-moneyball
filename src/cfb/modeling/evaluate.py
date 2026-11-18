@@ -17,6 +17,7 @@ between models get paired CIs.
 
 import numpy as np
 import pandas as pd
+from scipy.stats import rankdata
 
 TOP_SHARE = 0.2
 MIN_CELL = 5
@@ -27,7 +28,22 @@ SET_ORDER = ["baseline", "baseline_plus", "full"]
 def _rank_corr(a, b):
     if len(a) < 3 or np.std(a) == 0 or np.std(b) == 0:
         return np.nan
-    return pd.Series(a).rank().corr(pd.Series(b).rank())
+    return float(np.corrcoef(rankdata(a), rankdata(b))[0, 1])
+
+
+def _weighted_lift(y, pred, groups, min_n=1, top_share=TOP_SHARE):
+    """Size-weighted mean over groups of (top-share mean - group mean). Ties
+    in pred keep row order (stable sort), as in tier_lifts."""
+    total, weight = 0.0, 0
+    for g in np.unique(groups):
+        idx = np.flatnonzero(groups == g)
+        if len(idx) < min_n:
+            continue
+        k = max(1, int(np.ceil(top_share * len(idx))))
+        top = idx[np.argsort(-pred[idx], kind="stable")[:k]]
+        total += (y[top].mean() - y[idx].mean()) * len(idx)
+        weight += len(idx)
+    return total / weight if weight else np.nan
 
 
 def tier_lifts(y, pred, tiers, top_share=TOP_SHARE) -> pd.DataFrame:
@@ -48,12 +64,11 @@ def metrics(y, pred, tiers, positions) -> dict:
     y, pred = np.asarray(y, float), np.asarray(pred, float)
     positions = np.asarray(positions)
     by_pos = [_rank_corr(y[positions == p], pred[positions == p]) for p in np.unique(positions)]
-    lifts = tier_lifts(y, pred, tiers)
-    cells = tier_lifts(y, pred, pd.Series(tiers).astype(str) + "|" + pd.Series(positions))
-    cells = cells[cells.n >= MIN_CELL]
+    tiers = np.asarray(tiers).astype(str)
+    cells = np.char.add(np.char.add(tiers, "|"), positions.astype(str))
     return {"spearman": _rank_corr(y, pred), "spearman_by_pos": np.nanmean(by_pos),
-            "tier_lift": float((lifts.lift * lifts.n).sum() / lifts.n.sum()),
-            "tier_pos_lift": float((cells.lift * cells.n).sum() / cells.n.sum())}
+            "tier_lift": _weighted_lift(y, pred, tiers),
+            "tier_pos_lift": _weighted_lift(y, pred, cells, min_n=MIN_CELL)}
 
 
 def evaluate(test: pd.DataFrame, preds: dict, target="par_window", n_boot=1000, seed=0,
