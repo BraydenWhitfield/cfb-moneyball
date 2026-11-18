@@ -2,7 +2,7 @@
 
     python -m cfb.modeling.run [--boot 1000]
 
-Writes data/processed/models/: report.txt, predictions.parquet.
+Writes data/processed/models/: report.txt, predictions.parquet, shap_<kind>.parquet.
 Model names are "<learner>:<feature set>", e.g. "ridge:baseline_plus".
 """
 
@@ -12,6 +12,7 @@ import pandas as pd
 
 from cfb.modeling.data import FEATURE_SETS, TARGET, load_master, population, split, test_variants
 from cfb.modeling.evaluate import evaluate, tier_lifts
+from cfb.modeling.explain import format_summary, shap_summary
 from cfb.modeling.gbm import LGBMModel
 from cfb.modeling.linear import RidgeModel
 from cfb.processed import PROCESSED_DIR
@@ -46,6 +47,7 @@ def _fmt_diffs(diffs):
 def run(n_boot=1000):
     master = load_master()
     lines, all_preds = [], []
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
     for kind in ["recruit", "transfer"]:
         df = population(master, kind)
         train, test = split(df, kind)
@@ -75,8 +77,15 @@ def run(n_boot=1000):
         for name in shown:
             lines += ["", f"tier lifts, {name} (test: all)",
                       tier_lifts(test[TARGET], preds[name], test.tier).round(2).to_string()]
+        if "lgbm:full" in models:
+            model = models["lgbm:full"]
+            model.shap_values(test).assign(acquisition_id=test.acquisition_id.to_numpy())                  .to_parquet(OUT_DIR / f"shap_{kind}.parquet")
+            for variant, rows in test_variants(train, test, kind).items():
+                if variant == "new_players":
+                    continue
+                lines += ["", f"SHAP, lgbm:full (test: {variant}, n={len(rows):,})",
+                          format_summary(shap_summary(model, rows))]
         lines.append("")
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
     pd.concat(all_preds, ignore_index=True).to_parquet(OUT_DIR / "predictions.parquet")
     text = "\n".join(lines)
     (OUT_DIR / "report.txt").write_text(text + "\n", encoding="utf-8")

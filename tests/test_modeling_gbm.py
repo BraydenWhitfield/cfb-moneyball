@@ -41,3 +41,14 @@ def test_shap_values_sum_to_predictions():
     shap = m.shap_values(df.head(20))
     assert list(shap.columns) == ["rating", "position", "unrated", "expected_value"]
     np.testing.assert_allclose(shap.sum(axis=1), m.predict(df.head(20)), rtol=1e-6, atol=1e-6)
+
+
+def test_shap_summary_ranks_features_and_gives_direction():
+    from cfb.modeling.explain import shap_summary
+    df = _data()
+    m = LGBMModel(["rating", "position", "unrated"]).fit(df)
+    s = shap_summary(m, df).set_index("feature")
+    assert s.share.sum() == pytest.approx(1.0)
+    assert s.index[0] in {"rating", "position"}
+    assert s.loc["rating", "direction"] > 0.5            # higher rating -> higher prediction
+    assert "QB" in s.loc["position", "levels"]
