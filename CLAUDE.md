@@ -37,11 +37,11 @@ I'm a student building this to learn and to show interviewers.
 - `src/cfb/clean.py`: name/team normalization, position map, dedupes, PPA/usage split merge.
 - `src/cfb/crosswalk.py`: `python -m cfb.crosswalk` writes `data/processed/`:
   `players.parquet` (one row per person), `portal_links.parquet` (one row per portal
-  entry), `coverage.txt`.
-- `src/cfb/handcheck.py`: `python -m cfb.handcheck sample|summarize`. A stratified
-  sample of unmatched players is in `annotations/handcheck_v1.csv`, waiting for
-  my labels (bust / failed_join / unsure).
-- Tests: 63 passing (`pytest`). Setup: `pip install -r requirements.txt` (includes `-e .`).
+  entry), `id_aliases.parquet` (merged split IDs), `coverage.txt`.
+- `src/cfb/handcheck.py`: `python -m cfb.handcheck sample|summarize`.
+  `annotations/handcheck_v1.csv` is labeled (100 rows; Claude's suggested verdicts are
+  kept in separate columns, `verdict` holds the final labels).
+- Tests: 95 passing (`pytest`). Setup: `pip install -r requirements.txt` (includes `-e .`).
 
 ### Key decisions
 - Market price = `rating` (continuous), not `ranking`. `ranking` is a national rank by
@@ -55,7 +55,8 @@ I'm a student building this to learn and to show interviewers.
   values are not additive).
 - One ID space: recruit athleteId = stats playerId = PPA id = draft collegeAthleteId.
   person_id = that ID, else `rec:` / `portal:` / `draft:` keys.
-- `match_method`: athlete_id, name_team_season, unmatched. Matching never guesses:
+- `match_method`: athlete_id, name_team_season, name_variant, nationwide_name (recruits
+  only), unmatched. Matching never guesses:
   ambiguous candidates stay unmatched; a player_id goes to at most one recruit
   (athlete_id wins; colliding name matches are all dropped).
 - Negative athleteIds (646, 2017-2019 classes) are placeholders and treated as missing.
@@ -65,20 +66,38 @@ I'm a student building this to learn and to show interviewers.
 - Team aliases are a small hand-verified list (no fuzzy team matching). Accents are kept.
 - Hand-check scope: unmatched QB/RB/WR recruits from the 2021-2023 classes, plus unmatched
   portal entrants with a destination. Rates are reweighted by stratum size.
+- Hand-check result (2026-11-18, before fixes): failed-join rate portal 47% (CI 30-64%),
+  recruits 21% (CI 7-34%). The labels were AI-assisted and agree with Claude's
+  suggestions on 96/100 rows, so they are not an independent check of that heuristic.
+- Honorary records: `EXCLUDED_RECRUITS` in clean.py (Tate Myre). No data signature
+  exists for honorary ratings, so the list is hand-verified.
+- Position is only a tiebreaker in name matches (recruit, portal, draft): a unique
+  name + team + window candidate is accepted at any position. Strict for the
+  recruit<->portal link and for nationwide_name.
+- name_variant: only without an exact candidate, same team and window. One name part exact,
+  the other close (shared surname word + prefix/nickname/0.8 first name, or same first name
+  + 0.85 surname). Exact beats variant for the same ID.
+- nationwide_name: name unique among all stat lines, first season >= class year,
+  compatible position, unclaimed. Lower confidence; filterable by its tag.
+- Split IDs merged: same name + team, no shared season, at most 1 empty season between,
+  compatible positions, and not two different recruits' athleteIds (26 merged).
+  Production tables must be remapped with `id_aliases.parquet`.
 
-### Coverage (from coverage.txt)
-- Recruits from the 2021-2025 classes with any stat line: QB 48.2%, RB 62.4%, WR 58.0%.
-- Portal entrants with a destination, matched: QB 77.7%, RB 86.2%, WR 83.7%.
+### Coverage (from coverage.txt; before hand-check fixes in parentheses)
+- Recruits from the 2021-2025 classes with any stat line: QB 51.7% (48.2), RB 65.8% (62.4),
+  WR 60.5% (58.0).
+- Portal entrants with a destination, matched: QB 83.6% (77.7), RB 92.0% (86.2),
+  WR 86.4% (83.7).
+- Hand-check: 26 of 42 labeled failed joins now matched, 0 of 54 busts matched.
 - Draft: 1,549 of 1,551 picks matched by ID.
 
 ### Open issues
-- Duplicate IDs inside the stats data: one player can have two playerIds (e.g. Kevric
-  Wiggins at Jackson State), which can split one person into two rows. These drive many of
-  the 150 remaining `link_conflict`s.
-- QB/punter position rule: `positions_compatible` rejects QB vs ST, which blocked e.g.
-  Jack Dawson (portal QB who appears as a punter). Revisit after the hand-check.
-- Nicknames (Cam/Cameron) aren't handled. Fuzzy name matching depends on the hand-check's
-  failed-join rate.
-- Hand-check labels not done yet. Next: label, run `summarize`, decide on fuzzy matching.
+- Portal residual failed-join rate among still-unmatched entrants is about 30% (from the
+  labels): wrong portal destinations (Damante, Costelli, D.J. Matthews), personal nicknames
+  (Chip, Woody, KC, Trey), and split IDs across teams or in the same season (Hooks,
+  Adkins, Aaron Young), which the same-team merge rule does not cover. Recruits: about 2%.
+- 154 `link_conflict`s remain.
+- nationwide_name precision is only spot-checked (common names like Trey Adams are
+  uncertain). Consider a second hand-check sample of matched rows.
 - Not yet decided: target definition for the model, how to price transfers with no rating,
   and how to handle recent classes with few seasons observed (censoring).
