@@ -24,9 +24,11 @@ from cfb.clean import norm_name, norm_team, position_group
 MATCH_METHODS = ("athlete_id", "name_team_season", "unmatched")
 
 # Position groups that may legitimately be the same player across sources
-# (recruiting services and stats disagree on hybrid roles). Used only to
-# reject implausible NAME matches, e.g. a QB recruit vs a same-named DL.
-# Same group is always compatible, and ATH is compatible with everything.
+# (recruiting services and stats disagree on hybrid roles). In name matching
+# this is only a TIEBREAKER: a unique name + team + season candidate is
+# accepted whatever its position (players do switch, e.g. QB -> WR or RB -> S;
+# see the hand-check), and incompatible candidates are dropped only when there
+# are several. Same group is always compatible; ATH is compatible with all.
 COMPATIBLE_GROUPS = {
     frozenset({"DL", "LB"}),   # edge rushers: DE vs OLB
     frozenset({"LB", "DB"}),   # safeties who move to LB
@@ -180,6 +182,16 @@ def match_recruits_by_id(recruits: pd.DataFrame, stat_players: pd.DataFrame) -> 
     })
 
 
+def _position_tiebreak(cand, key, col_a, col_b):
+    """Drop position-incompatible candidates, but only for keys with more than
+    one distinct player_id. A lone candidate is kept whatever its position, and
+    if none of several is compatible all are kept (-> flagged ambiguous)."""
+    several = cand.groupby(key).player_id.transform("nunique").gt(1)
+    ok = _compatible_rows(cand, col_a, col_b)
+    any_ok = ok.groupby(cand[key]).transform("any")
+    return cand[~several | ok | ~any_ok]
+
+
 def _summarize_candidates(candidates, left_key, method):
     """Collapse candidate pairs to one row per left_key: a unique player_id, or
     ambiguous (player_id NA, match_method "unmatched") when there are several."""
@@ -195,7 +207,7 @@ def _summarize_candidates(candidates, left_key, method):
 
 def match_recruits_by_name(recruits: pd.DataFrame, stat_players: pd.DataFrame) -> pd.DataFrame:
     """Name fallback: same normalized name, team == committedTo, stat season >=
-    class year, compatible position.
+    class year. Position only breaks ties (_position_tiebreak).
 
     Applies to recruits with no athleteId AND to recruits whose athleteId never
     appears on the field (possibly a stale/duplicate ID - see resolve_conflicts).
@@ -206,7 +218,7 @@ def match_recruits_by_name(recruits: pd.DataFrame, stat_players: pd.DataFrame) -
     cand = no_id.merge(stat_players, left_on=["name_key", "committedTo"],
                        right_on=["name_key", "team"])
     cand = cand[cand.stat_season >= cand.year]
-    cand = cand[_compatible_rows(cand, "position_group", "stat_position_group")]
+    cand = _position_tiebreak(cand, "recruit_id", "position_group", "stat_position_group")
     return _summarize_candidates(cand, "recruit_id", "name_team_season")
 
 
@@ -312,16 +324,16 @@ def _portal_candidates(portal, stat_players, team_col, window, side):
                         right_on=["name_key", "team"])
     offset = cand.stat_season - cand.season
     cand = cand[(offset >= window[0]) & (offset <= window[1])]
-    cand = cand[_compatible_rows(cand, "position_group", "stat_position_group")]
-    return cand[["portal_key", "player_id"]].assign(side=side)
+    return cand[["portal_key", "player_id", "position_group", "stat_position_group"]].assign(
+        side=side)
 
 
 def match_portal(portal: pd.DataFrame, stat_players: pd.DataFrame) -> pd.DataFrame:
     """One row per portal entry (clean_portal output) -> player_id.
 
     Searches the destination (stat season within DESTINATION_WINDOW) and the
-    origin (ORIGIN_WINDOW) by name + team + compatible position. One distinct
-    player across both sides -> matched; several -> ambiguous (unmatched).
+    origin (ORIGIN_WINDOW) by name + team; position only breaks ties. One
+    distinct player across both sides -> matched; several -> ambiguous.
     Portal rows carry no IDs, so match_method is "name_team_season" or "unmatched".
     match_side: "destination", "origin", "both", or <NA>.
     """
@@ -330,6 +342,7 @@ def match_portal(portal: pd.DataFrame, stat_players: pd.DataFrame) -> pd.DataFra
                            "destination"),
         _portal_candidates(portal, stat_players, "origin", ORIGIN_WINDOW, "origin"),
     ], ignore_index=True)
+    cand = _position_tiebreak(cand, "portal_key", "position_group", "stat_position_group")
     summary = _summarize_candidates(cand, "portal_key", "name_team_season")
     sides = (cand.drop_duplicates(["portal_key", "side"]).groupby("portal_key").side
                  .agg(lambda s: "both" if len(s) == 2 else s.iloc[0]))
@@ -345,7 +358,8 @@ def match_portal(portal: pd.DataFrame, stat_players: pd.DataFrame) -> pd.DataFra
 
 def link_recruits_to_portal(recruits: pd.DataFrame, portal: pd.DataFrame) -> pd.DataFrame:
     """Recruit <-> portal entry pairs: same name, portal origin == committedTo,
-    portal season >= class year, compatible position.
+    portal season >= class year, compatible position. Position stays a hard
+    rule here: both sides are recruiting-service positions, not stat lines.
 
     Each portal entry links to at most one recruit (two same-named recruits at
     one school -> neither, never a guess). A recruit may have several entries
@@ -481,7 +495,7 @@ def match_draft(draft: pd.DataFrame, stat_players: pd.DataFrame) -> pd.DataFrame
     by_name = picks[picks.collegeAthleteId.isna()].merge(
         stat_players, left_on=["name_key", "collegeTeam"], right_on=["name_key", "team"])
     by_name = by_name[by_name.stat_season <= by_name.year]
-    by_name = by_name[_compatible_rows(by_name, "position_group", "stat_position_group")]
+    by_name = _position_tiebreak(by_name, "draft_key", "position_group", "stat_position_group")
     name_matches = _summarize_candidates(by_name, "draft_key", "name_team_season")
 
     out = picks.merge(name_matches.rename(columns={"player_id": "name_player_id"}),

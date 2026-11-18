@@ -117,13 +117,31 @@ def test_match_by_name_uses_name_team_and_season():
 @pytest.mark.parametrize("stat_kwargs", [
     {"team": "Michigan"},           # wrong team
     {"season": 2020},               # before the recruit's class year (2021)
-    {"group": "DL"},                # QB recruit vs same-named lineman
 ])
-def test_match_by_name_rejects_wrong_team_season_or_position(stat_kwargs):
+def test_match_by_name_rejects_wrong_team_or_season(stat_kwargs):
     recs = recruits_df(recruit("r1", "John Smith"))
     line = {"player_id": "9", "name": "John Smith", "season": 2022, **stat_kwargs}
     stats = stats_df(stat_line(**line))
     assert len(match_recruits_by_name(recs, stats)) == 0
+
+
+def test_match_by_name_accepts_a_lone_candidate_at_another_position():
+    # QB recruit who became a WR (e.g. Shai Werts): position is only a tiebreaker.
+    recs = recruits_df(recruit("r1", "John Smith"))
+    stats = stats_df(stat_line("9", "John Smith", 2022, group="WR"))
+    assert by_recruit(match_recruits_by_name(recs, stats)).loc["r1", "player_id"] == "9"
+
+
+def test_match_by_name_uses_position_to_break_ties():
+    recs = recruits_df(recruit("r1", "John Smith"))
+    stats = stats_df(stat_line("9", "John Smith", 2022, group="DL"),
+                     stat_line("10", "John Smith", 2022, group="QB"))
+    out = by_recruit(match_recruits_by_name(recs, stats))
+    assert out.loc["r1", "player_id"] == "10" and not out.loc["r1", "ambiguous"]
+
+    stats = stats_df(stat_line("9", "John Smith", 2022, group="DL"),
+                     stat_line("11", "John Smith", 2022, group="DB"))
+    assert by_recruit(match_recruits_by_name(recs, stats)).loc["r1", "ambiguous"]
 
 
 def test_match_by_name_ignores_recruits_that_have_athlete_id():
@@ -311,6 +329,15 @@ def test_match_portal_sides_disagreeing_is_ambiguous():
                      stat_line("2", "Mark Williams", 2023, team="Texas Tech", group="RB"))
     row = match_portal(portal, stats).iloc[0]
     assert row.ambiguous and row.match_method == "unmatched" and pd.isna(row.player_id)
+
+
+def test_match_portal_lone_candidate_at_new_position_matches():
+    # QB who became a punter at his destination (e.g. Jack Dawson).
+    from cfb.crosswalk import match_portal
+    portal = portal_df(portal_entry("Jack", "Dawson", position="QB"))
+    stats = stats_df(stat_line("1", "Jack Dawson", 2023, team="Texas Tech", group="ST"))
+    row = match_portal(portal, stats).iloc[0]
+    assert row.player_id == "1" and row.match_side == "destination"
 
 
 def test_link_recruits_to_portal_requires_origin_season_and_unique_recruit():
