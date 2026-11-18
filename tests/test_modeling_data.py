@@ -20,8 +20,8 @@ def master_row(aid, kind, season, **kw):
 
 
 def test_no_class_year_or_outcome_columns_in_any_feature_set():
-    banned = {"acq_season", "hs_class_year", "par_window", "tier_window", "unmatched",
-              "match_method", "drafted_after"}
+    banned = {"acq_season", "hs_class_year", "prior_seasons_available", "par_window",
+              "tier_window", "unmatched", "match_method", "drafted_after"}
     for sets in FEATURE_SETS.values():
         for cols in sets.values():
             assert not banned & set(cols)
@@ -60,7 +60,8 @@ def test_features_flags_and_moves():
     f = add_features(m).set_index("acquisition_id")
     assert f.move.tolist() == ["up", "up", "same"]
     assert f.rating_missing.tolist() == [False, True, False]
-    assert f.loc["c", "unrated_fcs"] and f.loc["c", "hs_missing"] and f.loc["c", "prior_missing"]
+    assert f.loc["c", "unrated_fcs"] and f.loc["c", "hs_missing"]
+    assert not f.loc["c", "prior_missing"]   # only 2021 transfers are flagged
     assert not f.loc["c", "hs_unrated"]
 
 
@@ -68,3 +69,13 @@ def test_home_area_and_tier():
     assert home_area(pd.Series(["TX", "OH", "ON", None])).tolist()[:3] == ["TX", "Midwest",
                                                                           "other"]
     assert tier(pd.Series(["4", "5", "3", "unrated"])).tolist() == ["4-5", "4-5", "3", "unrated"]
+
+
+def test_unmatched_transfers_get_no_linked_history_not_a_missing_flag():
+    m = pd.DataFrame([master_row("a", "transfer", 2023, unmatched=True, prior_par=None,
+                                 prior_plays=None, prior_best_tier=None),
+                      master_row("b", "transfer", 2021, prior_par=None, prior_plays=None,
+                                 prior_best_tier=None)])
+    f = add_features(m).set_index("acquisition_id")
+    assert f.loc["a", "prior_par"] == 0 and not f.loc["a", "prior_missing"]
+    assert pd.isna(f.loc["b", "prior_par"]) and f.loc["b", "prior_missing"]

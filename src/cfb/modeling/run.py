@@ -17,7 +17,7 @@ from cfb.processed import PROCESSED_DIR
 
 OUT_DIR = PROCESSED_DIR / "models"
 LEARNERS = {"ridge": RidgeModel}
-SETS = ["baseline", "baseline_plus"]
+SETS = ["baseline", "baseline_plus", "full"]
 
 
 def fit_all(kind, train):
@@ -55,6 +55,10 @@ def run(n_boot=1000):
         for name, model in models.items():
             if hasattr(model, "alpha"):
                 lines.append(f"{name}: alpha {model.alpha:g}")
+        if "ridge:full" in models:
+            coefs = models["ridge:full"].coefficients().head(15)
+            lines += ["", "ridge:full standardized coefficients (top 15 by size):",
+                      coefs.round(2).to_string()]
         preds = {name: model.predict(test) for name, model in models.items()}
         all_preds.append(test[["acquisition_id", "acquisition_type", "person_id", "name",
                                "tier", "position", TARGET]].assign(

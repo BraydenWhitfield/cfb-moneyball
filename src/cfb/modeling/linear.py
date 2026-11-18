@@ -32,7 +32,8 @@ class LinearDesign:
     def fit(self, df):
         f = self.features
         self.categorical = [c for c in f if c in CATEGORICAL]
-        self.boolean = [c for c in f if c not in self.categorical and df[c].dtype == bool]
+        self.boolean = [c for c in f if c not in self.categorical
+                        and pd.api.types.is_bool_dtype(df[c])]
         self.numeric = [c for c in f if c not in self.categorical + self.boolean]
         self.medians = {c: df[c].median() for c in self.numeric}
         self.flag = [c for c in self.numeric if c != "rating" and df[c].isna().any()]

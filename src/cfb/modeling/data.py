@@ -55,7 +55,7 @@ FEATURE_SETS = {
         "full": BASELINE["transfer"] + ["level", "origin_level", "move", "eligibility", "hs_rating",
                             "hs_unrated", "hs_missing", "years_since_hs", "qb_style",
                             "height", "weight", "prior_par", "prior_plays", "prior_best_tier",
-                            "prior_seasons_available", "prior_missing"],
+                            "prior_missing"],
     },
 }
 
@@ -88,7 +88,17 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     out["home_area"] = home_area(out.home_state)
     out["hs_missing"] = out.recruit_id.isna()
     out["hs_unrated"] = ~out.hs_missing & out.hs_stars.isna()
-    out["prior_missing"] = out.prior_par.isna()
+    # Prior production (transfers). The master table leaves it NaN for unmatched
+    # entries, but unmatched rows score 0 by construction, so a "missing" flag
+    # would let a model learn our join failures. Treat them as "no linked
+    # history" (0), the same as a matched player with no earlier stat line.
+    # prior_missing then only marks 2021 transfers (no 2020 data). Season-like
+    # columns (prior_seasons_available = season - 2021) are not features.
+    transfer = out.acquisition_type.eq("transfer")
+    no_history = transfer & out.unmatched.astype(bool) & out.acq_season.gt(2021)
+    for col in ["prior_par", "prior_plays", "prior_best_tier"]:
+        out[col] = pd.to_numeric(out[col], errors="coerce").astype(float).mask(no_history, 0.0)
+    out["prior_missing"] = transfer & out.acq_season.eq(2021)
     origin = out.origin_level.map(LEVEL_ORDER).astype(float).to_numpy()
     dest = out.level.map(LEVEL_ORDER).astype(float).to_numpy()
     out["move"] = pd.Series(np.select([np.isnan(origin) | np.isnan(dest), dest > origin,
@@ -101,6 +111,9 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
         out[col] = pd.to_numeric(out[col], errors="coerce").astype(float)
     for col in ["eligibility", "qb_style", "origin_level"]:
         out[col] = out[col].astype("string")
+    for col in ["unrated", "rating_missing", "unrated_fcs", "hs_missing", "hs_unrated",
+                "prior_missing"]:
+        out[col] = out[col].fillna(False).astype(bool)   # plain numpy bool, not pyarrow
     return out
 
 
