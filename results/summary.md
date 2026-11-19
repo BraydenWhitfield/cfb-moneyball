@@ -8,7 +8,9 @@ summed over a player's first 3 seasons (recruits) or 2 seasons (transfers).
 ![Mean value by star tier](1_value_by_tier.png)
 ![Rating vs value](2_rating_vs_value.png)
 
-- A 5-star averages 6-10x the value of a 3-star (recruits 73 vs 7, transfers 84 vs 13).
+- Across all players, a 5-star averages about 12x the value of a 3-star for recruits
+  (73 vs 6.2) and about 6.5x for transfers (84 vs 13). The chart shows recruits who
+  signed with a school, where 3-stars average 7.
 - But rating ranks individual players poorly: rank correlation 0.20 for recruits who signed
   with a school (0.23 including those who didn't), 0.24 for transfers.
 

@@ -1,5 +1,7 @@
 # CFB Moneyball: is college football talent mispriced?
 
+*Python · pandas · scikit-learn · LightGBM · matplotlib · pytest · CollegeFootballData API*
+
 Every year, college programs spend scholarships on high-school recruits and transfer-portal
 players, and the "price" of a player is his star rating. This project asks a Moneyball
 question: **using only what is known on signing day, can you find players the market
@@ -12,10 +14,14 @@ later one.
 signing-day information I could get didn't beat them out of time. One signal is worth
 following up: QB transfers' prior playing time.
 
+![Mean value by star tier](results/1_value_by_tier.png)
+
 ## Key findings
 
-1. **Ratings are right on average but noisy for individuals.** 5-stars average 6-10x the
-   value of 3-stars, but the rank correlation between rating and value is only about 0.2.
+1. **Ratings are right on average but noisy for individuals.** Across all players, 5-stars
+   average about 12x the value of 3-stars for recruits (73 vs 6.2) and about 6.5x for
+   transfers (84 vs 13); the chart shows recruits who signed with a school, where 3-stars
+   average 7. But the rank correlation between rating and value is only about 0.2.
 2. **Signing-day features don't beat the market.** A full model (size, home region,
    high-school rating, prior production, ...) does no better than
    *rating + position + level of the signing school* for recruits (difference -0.013,
@@ -32,9 +38,9 @@ following up: QB transfers' prior playing time.
 ![Full model vs baseline+](results/3_full_vs_baseline_plus.png)
 
 ### Example: Boise State, the over-performer that didn't repeat
-Out of 229 schools, one passed a false-discovery correction: Boise State's 2021-22 recruits
-(under coach Andy Avalos) beat their ratings by +32 points each. Its 2023 class came in
-at -5.6. A good story from one sample that disappears in the next is exactly what
+Out of 229 schools, one passed a false-discovery correction: Boise State's 12 recruits from
+the 2021-22 classes (under coach Andy Avalos) beat their rating-based prediction by an
+average of +32 points per recruit. Its 2023 class averaged -5.6 per recruit (8 recruits). A good story from one sample that disappears in the next is exactly what
 shrinkage and out-of-time testing are for.
 
 ![Group persistence](results/5_group_persistence.png)
@@ -55,7 +61,8 @@ All six charts and the numbers behind them: [results/summary.md](results/summary
   scale. Baselines include position, and results are reported within position.
 - **Joins that guess.** A rule meant to merge players split across two IDs also merged two
   different Daniel Jacksons (a WR and a kicker), so merges now require compatible positions.
-  A 100-player hand check estimated the remaining match error.
+  A 100-player hand check estimated the remaining match error (labels were AI-assisted,
+  with ambiguous cases verified by web search).
 
 ## Data and method
 - **Data:** [CollegeFootballData.com](https://collegefootballdata.com) API (free tier, ~50
@@ -77,6 +84,8 @@ All six charts and the numbers behind them: [results/summary.md](results/summary
 ## Limitations
 - **Public stats can't measure blocking,** so offensive and defensive linemen are out of
   scope and tight ends are undervalued (they appear only in the group analysis).
+- **PPA depends on team context.** Scheme and supporting cast shape a player's production,
+  so value partly reflects where he played, not only how good he is.
 - **Coaches data covers FBS only,** so the coach analysis skips FCS signees.
 - **Single test years.** Recruits are tested on the 2023 class and transfers on 2024, with
   2025 only as a one-season check. More seasons are needed before any signal is trusted.
@@ -86,7 +95,7 @@ All six charts and the numbers behind them: [results/summary.md](results/summary
 ## Reproduce
 ```bash
 pip install -r requirements.txt            # Python 3.11+
-echo CFBD_API_KEY=your_key > .env          # free key from collegefootballdata.com
+# Copy .env.example to .env and add your key (free from collegefootballdata.com)
 python -m cfb.fetch --run                  # ~50 API calls, cached in data/raw/
 python -m cfb.crosswalk                    # link recruits / portal / draft to players
 python -m cfb.master                       # one row per acquisition, with outcomes
@@ -102,5 +111,10 @@ pytest                                     # 139 tests
   for 2025 transfers.
 - **Offensive and defensive linemen,** if better data (snap counts, grades) becomes
   available.
+- **Verified athleticism:** test whether measured speed (e.g. high-school 100m times)
+  predicts value beyond rating.
 - **A live portal board:** rank incoming transfers by the model's value estimate against
   their rating, and track how the picks turn out.
+
+---
+Brayden Whitfield · bwhitfield817@gmail.com
