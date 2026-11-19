@@ -12,12 +12,13 @@ import pandas as pd
 
 from cfb import load
 from cfb.modeling.data import load_master
-from cfb.modeling.groups import (add_group_keys, eb_shrink, head_coaches, mean_diff,
-                                 persistence, power_curve, recruit_population, residuals,
-                                 school_states)
+from cfb.modeling.groups import (add_group_keys, benjamini_hochberg, eb_shrink, head_coaches,
+                                 mean_diff, permutation_pvalues, persistence, power_curve,
+                                 recruit_population, residuals, school_states)
 from cfb.processed import PROCESSED_DIR
 
 OUT_DIR = PROCESSED_DIR / "models"
+FDR_Q = 0.10
 GROUPINGS = {"school": "school (all positions) - main school test",
              "school_pos": "school x position",
              "coach": "head coach of the class's first season (FBS only)"}
@@ -58,6 +59,33 @@ def in_state_table(df):
     return pd.DataFrame(rows)
 
 
+def callouts(df, n_perm):
+    """Per family: permutation p-values on 2021-22, BH q-values, the shrunk
+    effect, and the same group's 2023 (out-of-sample) mean residual."""
+    train, test = df[df.split.eq("train")], df[df.split.eq("test")]
+    out = {}
+    for key in GROUPINGS:
+        pv = permutation_pvalues(train, key, n_perm=n_perm)
+        pv["q"] = benjamini_hochberg(pv.p)
+        eff = eb_shrink(train.resid_w, train[key])
+        later = test.groupby(key).resid_w.agg(n_2023="size", mean_2023="mean")
+        out[key] = pv.join(eff[["shrunk"]]).join(later).sort_values("p")
+    return out
+
+
+def _fmt_callouts(tables):
+    lines = []
+    for key, t in tables.items():
+        hits = t[t.q < FDR_Q]
+        lines.append(f"  {key}: {len(t)} groups tested, {len(hits)} with q < {FDR_Q}")
+        show = hits if len(hits) else t.head(3)
+        label = "called out" if len(hits) else "smallest p (none survive FDR)"
+        lines.append(f"    {label}:")
+        cols = ["n", "mean", "shrunk", "p", "q", "n_2023", "mean_2023"]
+        lines += ["    " + row for row in show[cols].round(3).to_string().splitlines()]
+    return lines
+
+
 def _fmt_persist(t):
     t = t.copy()
     # With tau ~ 0 every shrunk effect is ~0, so the slope divides by ~0 variance.
@@ -70,7 +98,7 @@ def _fmt_persist(t):
               "slope", "corr"]].to_string(index=False)
 
 
-def report_lines(df, persist, powers, in_state):
+def report_lines(df, persist, powers, in_state, calls):
     lines = [__doc__.split("\n\n")[0].strip(), "",
              f"recruits: 2021-22 {int(df.split.eq('train').sum()):,} (cross-fitted residuals), "
              f"2023 {int(df.split.eq('test').sum()):,} (out of time); QB/RB/WR/TE",
@@ -87,14 +115,18 @@ def report_lines(df, persist, powers, in_state):
             f"tau={r.tau:g}: power {r.power:.0%} (corr {r.median_corr:+.2f})"
             for r in pc.itertuples()))
     lines += ["", "IN-STATE minus OUT-OF-STATE mean residual (PAR), bootstrap 95% CI:",
-              in_state.round(2).to_string(index=False)]
+              in_state.round(2).to_string(index=False), "",
+              "INDIVIDUAL GROUPS (2021-22): permutation p-values within class x position x",
+              f"level strata, Benjamini-Hochberg FDR per family. mean / shrunk / mean_2023 in "
+              f"PAR."] + _fmt_callouts(calls)
     return lines
 
 
-def run(n_boot=1000, sims=300):
+def run(n_boot=1000, sims=300, n_perm=10000):
     df = build_frame()
     persist, powers = persistence_table(df, n_boot, sims)
-    lines = report_lines(df, persist, powers, in_state_table(df))
+    calls = callouts(df, n_perm)
+    lines = report_lines(df, persist, powers, in_state_table(df), calls)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     keep = ["acquisition_id", "person_id", "name", "acq_season", "split", "position", "tier",
             "school", "school_pos", "coach_id", "coach", "transition", "in_state",

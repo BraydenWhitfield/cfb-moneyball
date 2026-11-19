@@ -211,3 +211,42 @@ def mean_diff(df, flag, col="resid_w", n_boot=2000, seed=0) -> dict:
     boots = [rng.choice(a, len(a)).mean() - rng.choice(b, len(b)).mean() for _ in range(n_boot)]
     return {"n_yes": len(a), "n_no": len(b), "diff": a.mean() - b.mean(),
             "lo": np.percentile(boots, 2.5), "hi": np.percentile(boots, 97.5)}
+
+
+# --- Multiple comparisons --------------------------------------------------------------
+
+STRATA = ["acq_season", "position", "level"]
+
+
+def permutation_pvalues(df, key, col="resid_w", strata=STRATA, n_perm=10000, seed=0):
+    """Two-sided permutation p-value for each group's mean residual.
+
+    Residuals are shuffled within strata (class year x position x level), so a
+    group isn't "significant" just for signing many QBs or FBS players.
+    p = (1 + #{|perm mean| >= |observed mean|}) / (1 + n_perm).
+    """
+    d = df.dropna(subset=[key]).reset_index(drop=True)
+    codes, groups = pd.factorize(d[key])
+    counts = np.bincount(codes)
+    r = d[col].to_numpy(float)
+    observed = np.bincount(codes, weights=r) / counts
+    strata_idx = list(d.groupby(strata, dropna=False).indices.values())
+    rng = np.random.default_rng(seed)
+    exceed = np.zeros(len(groups))
+    perm = r.copy()
+    for _ in range(n_perm):
+        for idx in strata_idx:
+            perm[idx] = r[idx][rng.permutation(len(idx))]
+        means = np.bincount(codes, weights=perm) / counts
+        exceed += np.abs(means) >= np.abs(observed) - 1e-12
+    return pd.DataFrame({"n": counts, "mean": observed,
+                         "p": (1 + exceed) / (1 + n_perm)}, index=pd.Index(groups, name=key))
+
+
+def benjamini_hochberg(p: pd.Series) -> pd.Series:
+    """BH-adjusted q-values (monotone, capped at 1)."""
+    order = p.sort_values().index
+    m = len(p)
+    ranked = p.loc[order].to_numpy() * m / np.arange(1, m + 1)
+    q = np.minimum.accumulate(ranked[::-1])[::-1].clip(max=1.0)
+    return pd.Series(q, index=order).reindex(p.index)

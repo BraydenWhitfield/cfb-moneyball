@@ -85,3 +85,23 @@ def test_mean_diff():
                       "resid_w": [2.0] * 50 + [0.0] * 51})
     out = mean_diff(d, "f", n_boot=100)
     assert out["diff"] == 2.0 and out["n_yes"] == 50 and out["n_no"] == 50
+
+
+def test_benjamini_hochberg_known_values():
+    from cfb.modeling.groups import benjamini_hochberg
+    q = benjamini_hochberg(pd.Series([0.01, 0.04, 0.03, 0.5], index=list("abcd")))
+    assert q.round(4).to_dict() == {"a": 0.04, "b": 0.0533, "c": 0.0533, "d": 0.5}
+
+
+def test_permutation_pvalues_flag_a_real_group_within_strata():
+    from cfb.modeling.groups import permutation_pvalues
+    rng = np.random.default_rng(0)
+    n = 400
+    df = pd.DataFrame({"g": rng.choice([f"s{i}" for i in range(20)], n),
+                       "acq_season": rng.choice([2021, 2022], n),
+                       "position": rng.choice(["QB", "WR"], n), "level": "FBS",
+                       "resid_w": rng.normal(0, 1, n)})
+    df.loc[df.g.eq("s0"), "resid_w"] += 3
+    out = permutation_pvalues(df, "g", n_perm=500)
+    assert out.loc["s0", "p"] < 0.01
+    assert (out.drop("s0").p > 0.01).mean() > 0.8
