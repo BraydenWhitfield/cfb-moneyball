@@ -120,4 +120,4 @@ pytest                                     # 139 tests
 Built with Claude Code as an AI pair programmer; I directed the analysis design, made the
 methodological decisions, and reviewed every result.
 
-Brayden Whitfield · bwhitfield817@gmail.com
+Brayden Whitfield
