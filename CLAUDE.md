@@ -20,7 +20,7 @@ I'm a student building this to learn and to show interviewers.
 - Keep changes small; one step at a time, one commit per step.
 
 ## Git
-- Never add a Co-Authored-By line (or any AI attribution) to commit messages.
+- Commit messages describe the change only.
 
 ## Project status (as of 2026-11-18)
 

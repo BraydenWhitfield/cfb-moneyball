@@ -166,6 +166,8 @@ def chart_models(master):
         ax.set_xlabel("Full model minus baseline+ (95% CI)")
         ax.set_yticks(ticks, ticklabels)
         ax.grid(axis="y", visible=False)
+    for ax in axes:
+        ax.xaxis.set_major_locator(plt.MultipleLocator(0.05))   # fewer ticks: no overlap
     axes[0].plot([], [], "o-", color=BLUE, label="Ridge")
     axes[0].plot([], [], "o-", color=ORANGE, label="LightGBM")
     axes[0].legend(loc="upper right", fontsize=9)

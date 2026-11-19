@@ -117,4 +117,7 @@ pytest                                     # 139 tests
   their rating, and track how the picks turn out.
 
 ---
+Built with Claude Code as an AI pair programmer; I directed the analysis design, made the
+methodological decisions, and reviewed every result.
+
 Brayden Whitfield · bwhitfield817@gmail.com
