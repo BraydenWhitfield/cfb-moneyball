@@ -53,7 +53,14 @@ I'm a student building this to learn and to show interviewers.
   (SHAP summaries), `run.py` (`python -m cfb.modeling.run`: all learners x feature sets ->
   `data/processed/models/report.txt`), `prior_plays.py` (`python -m
   cfb.modeling.prior_plays` -> `prior_plays_report.txt`). Full run takes ~10 minutes.
-- Tests: 127 passing (`pytest`). Setup: `pip install -r requirements.txt` (includes `-e .`).
+- `src/cfb/modeling/groups.py` + `group_analysis.py` (`python -m cfb.modeling.group_analysis`
+  -> `groups_report.txt`, `group_residuals.parquet`): recruit residuals vs baseline_plus,
+  EB shrinkage, persistence, power curves, permutation + BH FDR, coach movers.
+- Raw data also has `/coaches` 2020-2025 (FBS only) and `/teams` (2025 locations): 7 more
+  API calls, 953 left that month (2026-11).
+- Master table now includes TEs (for the group analysis only; models stay QB/RB/WR via
+  `MODEL_POSITIONS`). TE PPA misses blocking value.
+- Tests: 139 passing (`pytest`). Setup: `pip install -r requirements.txt` (includes `-e .`).
 
 ### Key decisions
 - Market price = `rating` (continuous), not `ranking`. `ranking` is a national rank by
@@ -142,8 +149,9 @@ I'm a student building this to learn and to show interviewers.
 - 300 unmatched transfers to FBS/FCS teams are scored 0 though ~30% may have played.
 - Unrated-vs-3-star FCS edge (+2.6 PAR, CI 0.1-5.2) did not survive out of time:
   `unrated_fcs` gets ~0.2% of SHAP and the full recruit model doesn't beat baseline_plus.
-- Next: confirm the QB prior-plays signal when 2026 data arrives (a third test year, and
-  2025 gets a complete 2-season window). Then the write-up.
+- Next: the write-up (no more new analyses, decided 2026-11-18). Later, when 2026 data
+  arrives: confirm the QB prior-plays signal (a third test year; 2025 gets a complete
+  2-season window).
 
 ### Modeling (decided 2026-11-18; code in `src/cfb/modeling/`)
 - Unrated recruits looked better than 3-stars (7.1 vs 6.2) because of SELECTION: unrated
@@ -199,3 +207,26 @@ QB transfers' prior playing time.
     (QB ~ +10 to +15 PAR per SD), but out of time only QBs are consistent: positive in
     both test years, each CI just touching 0. RB flips sign. Several comparisons were
     run, so treat the QB result as suggestive, not established.
+
+### Group analysis results (2026-11-18; `groups_report.txt`)
+Question: do some groups of recruits consistently beat their rating? Residual = value -
+ridge baseline_plus prediction (2021-22 cross-fitted, 2023 out of time), winsorized at the
+1st/99th percentiles; QB/RB/WR/TE recruits with a school (1,997 + 1,116). EB shrinkage
+toward 0 (DerSimonian-Laird tau2). Coach = most games in the class's first season (FBS
+only, 77% of recruits); 448 transition classes.
+- NOTHING PERSISTED. Correlation of 2021-22 shrunk effects with 2023 residuals: school
+  +0.016 [-0.039, +0.072] (tau ~ 0: no between-school variance even in-sample); school x
+  position -0.007 [-0.083, +0.066]; coach -0.004 [-0.072, +0.061] (-0.009 without
+  transition classes). 2021 -> 2022 and raw-residual versions are also null.
+- Power: with the real group sizes, true group effects with SD 5 PAR would have been
+  detected 97% (school), 77% (school x position), 92% (coach) of the time; SD 3 only
+  18-46%. So effects of ~5+ PAR are ruled out; small ones (SD <= 3) can't be.
+- In-sample tau for school x position (4.5) and coach (4.1) did not persist: it reflects
+  noise and heavy tails, not real group differences.
+- In-state minus out-of-state: -1.45 [-3.32, +0.41] (2021-22), -0.45 [-2.69, +1.74]
+  (2023). No effect.
+- FDR (BH, q < 0.10, permutation p within class x position x level): one call-out,
+  Boise State / Andy Avalos (same 12 recruits): +32 PAR in 2021-22 (q = 0.07 school, 0.095
+  coach), then -5.6 in 2023 (n=8). Did not persist. No school x position cell survives.
+- Coach movers (EXPLORATORY): 12 FBS coaches with classes at two schools; correlation of
+  effects -0.04 [-0.84, +0.79]. Uninformative.
