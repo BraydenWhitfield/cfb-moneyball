@@ -8,12 +8,14 @@ See cfb.modeling.groups for the residual and shrinkage definitions.
 
 import argparse
 
+import numpy as np
 import pandas as pd
 
 from cfb import load
 from cfb.modeling.data import load_master
-from cfb.modeling.groups import (add_group_keys, benjamini_hochberg, eb_shrink, head_coaches,
-                                 mean_diff, permutation_pvalues, persistence, power_curve,
+from cfb.modeling.groups import (add_group_keys, benjamini_hochberg, coach_movers, eb_shrink,
+                                 head_coaches, mean_diff, mover_correlation,
+                                 permutation_pvalues, persistence, power_curve,
                                  recruit_population, residuals, school_states)
 from cfb.processed import PROCESSED_DIR
 
@@ -98,7 +100,7 @@ def _fmt_persist(t):
               "slope", "corr"]].to_string(index=False)
 
 
-def report_lines(df, persist, powers, in_state, calls):
+def report_lines(df, persist, powers, in_state, calls, movers):
     lines = [__doc__.split("\n\n")[0].strip(), "",
              f"recruits: 2021-22 {int(df.split.eq('train').sum()):,} (cross-fitted residuals), "
              f"2023 {int(df.split.eq('test').sum()):,} (out of time); QB/RB/WR/TE",
@@ -119,6 +121,13 @@ def report_lines(df, persist, powers, in_state, calls):
               "INDIVIDUAL GROUPS (2021-22): permutation p-values within class x position x",
               f"level strata, Benjamini-Hochberg FDR per family. mean / shrunk / mean_2023 in "
               f"PAR."] + _fmt_callouts(calls)
+    mc = mover_correlation(movers)
+    lines += ["", "COACH MOVERS (EXPLORATORY, small sample): shrunk effect at the first school",
+              "vs the next, from 2021-23 recruit classes (EB over coach x school cells, "
+              f"tau = {np.sqrt(movers.attrs['tau2']):.2f}).",
+              f"  {mc['movers']} movers; correlation {mc['corr']:+.2f} "
+              f"[{mc['lo']:+.2f}, {mc['hi']:+.2f}] (bootstrap over movers)",
+              movers.round(2).to_string(index=False)]
     return lines
 
 
@@ -126,7 +135,7 @@ def run(n_boot=1000, sims=300, n_perm=10000):
     df = build_frame()
     persist, powers = persistence_table(df, n_boot, sims)
     calls = callouts(df, n_perm)
-    lines = report_lines(df, persist, powers, in_state_table(df), calls)
+    lines = report_lines(df, persist, powers, in_state_table(df), calls, coach_movers(df))
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     keep = ["acquisition_id", "person_id", "name", "acq_season", "split", "position", "tier",
             "school", "school_pos", "coach_id", "coach", "transition", "in_state",

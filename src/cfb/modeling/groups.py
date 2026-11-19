@@ -250,3 +250,39 @@ def benjamini_hochberg(p: pd.Series) -> pd.Series:
     ranked = p.loc[order].to_numpy() * m / np.arange(1, m + 1)
     q = np.minimum.accumulate(ranked[::-1])[::-1].clip(max=1.0)
     return pd.Series(q, index=order).reindex(p.index)
+
+
+# --- Coach movers (exploratory) ---------------------------------------------------------
+
+def coach_movers(df, col="resid_w") -> pd.DataFrame:
+    """Coaches whose 2021-23 recruit classes come from 2+ schools: shrunk effect
+    at the earlier school vs the next one (EB over coach x school cells)."""
+    d = df.dropna(subset=["coach"]).assign(cell=lambda x: x.coach + " @ " + x.school)
+    eff = eb_shrink(d[col], d.cell)
+    first_year = d.groupby("cell").acq_season.min()
+    cells = (d.drop_duplicates("cell")[["cell", "coach", "school"]]
+              .assign(first_class=lambda x: x.cell.map(first_year),
+                      n=lambda x: x.cell.map(eff.n), shrunk=lambda x: x.cell.map(eff.shrunk),
+                      mean=lambda x: x.cell.map(eff["mean"]))
+              .sort_values(["coach", "first_class"]))
+    rows = []
+    for coach, g in cells.groupby("coach"):
+        if len(g) < 2:
+            continue
+        a, b = g.iloc[0], g.iloc[1]
+        rows.append({"coach": coach, "school_1": a.school, "n_1": a.n, "effect_1": a.shrunk,
+                     "school_2": b.school, "n_2": b.n, "effect_2": b.shrunk})
+    out = pd.DataFrame(rows)
+    out.attrs["tau2"] = eff.attrs["tau2"]
+    return out
+
+
+def mover_correlation(movers: pd.DataFrame, n_boot=2000, seed=0) -> dict:
+    x, y = movers.effect_1.to_numpy(float), movers.effect_2.to_numpy(float)
+    rng = np.random.default_rng(seed)
+    boots = []
+    for _ in range(n_boot):
+        i = rng.integers(0, len(x), len(x))
+        boots.append(_slope_corr(x[i], y[i])[1])
+    return {"movers": len(x), "corr": _slope_corr(x, y)[1],
+            "lo": np.nanpercentile(boots, 2.5), "hi": np.nanpercentile(boots, 97.5)}

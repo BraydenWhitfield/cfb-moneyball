@@ -105,3 +105,19 @@ def test_permutation_pvalues_flag_a_real_group_within_strata():
     out = permutation_pvalues(df, "g", n_perm=500)
     assert out.loc["s0", "p"] < 0.01
     assert (out.drop("s0").p > 0.01).mean() > 0.8
+
+
+def test_coach_movers_pairs_first_two_schools():
+    from cfb.modeling.groups import coach_movers, mover_correlation
+    rng = np.random.default_rng(0)
+    rows = []
+    for c in range(8):
+        for school, year in [(f"A{c}", 2021), (f"B{c}", 2023)]:
+            for _ in range(10):
+                rows.append({"coach": f"c{c}", "school": school, "acq_season": year,
+                             "resid_w": c + rng.normal(0, 1)})
+    rows.append({"coach": "stay", "school": "S", "acq_season": 2021, "resid_w": 0.0})
+    mv = coach_movers(pd.DataFrame(rows))
+    assert len(mv) == 8 and set(mv.school_1) == {f"A{c}" for c in range(8)}
+    out = mover_correlation(mv, n_boot=200)
+    assert out["movers"] == 8 and out["corr"] > 0.9
