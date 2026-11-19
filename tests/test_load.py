@@ -31,3 +31,16 @@ def test_load_draft_casts_int_ids_to_strings_matching_other_sources(tmp_path):
 def test_load_raw_errors_clearly_when_cache_is_empty(tmp_path):
     with pytest.raises(FileNotFoundError, match="No cached files"):
         load_raw("player/portal", raw_dir=tmp_path)
+
+
+def test_load_coaches_flattens_seasons(tmp_path):
+    import json
+    from cfb.load import load_coaches
+    (tmp_path / "coaches").mkdir()
+    (tmp_path / "coaches" / "year=2022.json").write_text(json.dumps([
+        {"id": 164, "firstName": "Luke", "lastName": "Fickell", "seasons": [
+            {"school": "Wisconsin", "year": 2022, "games": 1},
+            {"school": "Cincinnati", "year": 2022, "games": 12}]}]), encoding="utf-8")
+    df = load_coaches(raw_dir=tmp_path)
+    assert len(df) == 2 and df.coach_id.tolist() == ["164", "164"]
+    assert set(df.columns) >= {"school", "season", "games", "firstName", "lastName"}

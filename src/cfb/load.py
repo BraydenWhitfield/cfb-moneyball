@@ -58,3 +58,19 @@ def load_stats(raw_dir=DEFAULT_CACHE_DIR):
 
 def load_draft(raw_dir=DEFAULT_CACHE_DIR):
     return _as_id(load_raw("draft/picks", raw_dir=raw_dir), "collegeAthleteId")
+
+
+def load_coaches(raw_dir=DEFAULT_CACHE_DIR):
+    """One row per (coach, school, season) with games coached; coach_id as string."""
+    files = sorted((Path(raw_dir) / "coaches").glob("year=*.json"))
+    if not files:
+        raise FileNotFoundError(f"No cached coaches files in {raw_dir}")
+    frames = [pd.json_normalize(json.loads(f.read_text(encoding="utf-8")), "seasons",
+                                ["id", "firstName", "lastName"]) for f in files]
+    df = pd.concat(frames, ignore_index=True).rename(columns={"id": "coach_id", "year": "season"})
+    return _as_id(df, "coach_id")
+
+
+def load_teams(raw_dir=DEFAULT_CACHE_DIR):
+    """Team list with location columns (location.state etc.)."""
+    return load_raw("teams", raw_dir=raw_dir)

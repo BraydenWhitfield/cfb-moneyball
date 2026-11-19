@@ -26,6 +26,11 @@ DATASETS = [
     ("stats_season", "/stats/player/season", range(2021, 2026), {}),
     # 2026 draft has already happened and includes many portal-era players.
     ("draft", "/draft/picks", range(2021, 2027), {}),
+    # Head coaches by school and season; 2020 shows coaching changes before the
+    # 2021 class. (Added for the group analysis.)
+    ("coaches", "/coaches", range(2020, 2026), {}),
+    # Team locations (state) for in-state vs out-of-state; one snapshot is enough.
+    ("teams", "/teams", range(2025, 2026), {}),
 ]
 
 

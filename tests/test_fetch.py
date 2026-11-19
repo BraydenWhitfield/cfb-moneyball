@@ -31,10 +31,11 @@ def make_client(tmp_path, session):
 
 def test_build_requests_counts():
     # 9 recruit classes + 5 portal + 5 PPA + 10 usage + 5 stats + 6 draft
-    assert len(build_requests()) == 40
+    # + 6 coaches + 1 teams
+    assert len(build_requests()) == 47
     # One year: one request per dataset (usage twice), all with year=2025.
     one_year = build_requests(years=[2025])
-    assert len(one_year) == 7
+    assert len(one_year) == 9
     assert all(params["year"] == 2025 for _, _, params in one_year)
 
 
@@ -48,7 +49,7 @@ def test_plan_skips_cached_without_api_calls(tmp_path):
     cached, todo = plan(client, build_requests(years=[2025]))
 
     assert [name for name, _, _ in cached] == ["recruits"]
-    assert len(todo) == 6
+    assert len(todo) == 8
     assert session.calls == []
 
 
@@ -58,7 +59,7 @@ def test_run_fetches_each_uncached_request_once(tmp_path):
     _, todo = plan(client, build_requests(years=[2025]))
 
     assert run(client, todo) == []
-    assert len(session.calls) == 7
+    assert len(session.calls) == 9
     # Usage with and without garbage time land in separate cache files.
     _, todo_after = plan(client, build_requests(years=[2025]))
     assert todo_after == []
