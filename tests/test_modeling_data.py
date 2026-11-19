@@ -79,3 +79,9 @@ def test_unmatched_transfers_get_no_linked_history_not_a_missing_flag():
     f = add_features(m).set_index("acquisition_id")
     assert f.loc["a", "prior_par"] == 0 and not f.loc["a", "prior_missing"]
     assert pd.isna(f.loc["b", "prior_par"]) and f.loc["b", "prior_missing"]
+
+
+def test_model_populations_exclude_tight_ends():
+    m = pd.DataFrame([master_row("a", "recruit", 2021),
+                      master_row("b", "recruit", 2021, position_group="TE")])
+    assert population(m, "recruit").acquisition_id.tolist() == ["a"]

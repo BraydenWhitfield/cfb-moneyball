@@ -2,7 +2,8 @@
 
     python -m cfb.master    # writes data/processed/master.parquet, master_report.txt
 
-Rows (QB/RB/WR, seasons 2021-2025):
+Rows (QB/RB/WR/TE, seasons 2021-2025; TE value is receiving/rushing only, so
+blocking tight ends look like busts):
   recruit   a recruit from the 2021-2025 classes; acquiring team = committedTo
   transfer  a portal entry with a destination (not withdrawn, not gone pro);
             acquiring team = destination
@@ -38,7 +39,7 @@ from cfb.processed import PROCESSED_DIR, load_id_aliases, load_players, load_por
 from cfb.production import build_production
 
 SEASONS = (2021, 2025)
-SCOPE = ("QB", "RB", "WR")
+SCOPE = ("QB", "RB", "WR", "TE")
 WINDOW = {"recruit": 3, "transfer": 2}
 FIRST_DATA_SEASON = 2021
 

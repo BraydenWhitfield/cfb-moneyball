@@ -25,6 +25,9 @@ import pandas as pd
 from cfb.processed import PROCESSED_DIR
 
 TARGET = "par_window"
+# The models cover QB/RB/WR. TEs are in the master table for the group analysis
+# only (their PPA misses blocking value).
+MODEL_POSITIONS = ("QB", "RB", "WR")
 SPLITS = {"recruit": ((2021, 2022), 2023), "transfer": ((2021, 2023), 2024)}
 
 # Recruiting hotbeds stand alone; other states fall into census regions.
@@ -120,7 +123,8 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
 def population(master: pd.DataFrame, kind: str) -> pd.DataFrame:
     (first, last_train), test_year = SPLITS[kind]
     df = master[master.acquisition_type.eq(kind) & master.window_complete.astype(bool)
-                & master.acq_season.between(first, test_year)]
+                & master.acq_season.between(first, test_year)
+                & master.position_group.isin(MODEL_POSITIONS)]
     if kind == "recruit":
         df = df[df.acquiring_team.notna()]
     return add_features(df).reset_index(drop=True)
