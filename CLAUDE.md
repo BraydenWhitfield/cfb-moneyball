@@ -149,7 +149,8 @@ I'm a student building this to learn and to show interviewers.
 - 300 unmatched transfers to FBS/FCS teams are scored 0 though ~30% may have played.
 - Unrated-vs-3-star FCS edge (+2.6 PAR, CI 0.1-5.2) did not survive out of time:
   `unrated_fcs` gets ~0.2% of SHAP and the full recruit model doesn't beat baseline_plus.
-- Next: the write-up (no more new analyses, decided 2026-11-18). Later, when 2026 data
+- Write-up done (2026-11-18): README.md, results/summary.md, results/*.png
+  (`python results/make_charts.py`). No more new analyses for now. Later, when 2026 data
   arrives: confirm the QB prior-plays signal (a third test year; 2025 gets a complete
   2-season window).
 
