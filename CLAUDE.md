@@ -48,7 +48,12 @@ I'm a student building this to learn and to show interviewers.
 - `src/cfb/master.py`: `python -m cfb.master` writes `data/processed/master.parquet` (one row
   per acquisition), `master_with_nationwide.parquet` (robustness), `master_report.txt`.
   8,478 rows: 5,322 recruits (2021-25 classes), 3,156 transfers (2021-25), QB/RB/WR.
-- Tests: 111 passing (`pytest`). Setup: `pip install -r requirements.txt` (includes `-e .`).
+- `src/cfb/modeling/`: `data.py` (populations, features, splits), `evaluate.py` (metrics,
+  paired bootstrap), `linear.py` (ridge), `gbm.py` (LightGBM + TreeSHAP), `explain.py`
+  (SHAP summaries), `run.py` (`python -m cfb.modeling.run`: all learners x feature sets ->
+  `data/processed/models/report.txt`), `prior_plays.py` (`python -m
+  cfb.modeling.prior_plays` -> `prior_plays_report.txt`). Full run takes ~10 minutes.
+- Tests: 127 passing (`pytest`). Setup: `pip install -r requirements.txt` (includes `-e .`).
 
 ### Key decisions
 - Market price = `rating` (continuous), not `ranking`. `ranking` is a national rank by
@@ -135,8 +140,10 @@ I'm a student building this to learn and to show interviewers.
 - nationwide_name precision is only spot-checked (common names like Trey Adams are
   uncertain). Consider a second hand-check sample of matched rows.
 - 300 unmatched transfers to FBS/FCS teams are scored 0 though ~30% may have played.
-- Unrated-vs-3-star FCS edge (+2.6 PAR, CI 0.1-5.2) is a hypothesis, tested via the
-  `unrated_fcs` feature out of time; not a finding.
+- Unrated-vs-3-star FCS edge (+2.6 PAR, CI 0.1-5.2) did not survive out of time:
+  `unrated_fcs` gets ~0.2% of SHAP and the full recruit model doesn't beat baseline_plus.
+- Next: confirm the QB prior-plays signal when 2026 data arrives (a third test year, and
+  2025 gets a complete 2-season window). Then the write-up.
 
 ### Modeling (decided 2026-11-18; code in `src/cfb/modeling/`)
 - Unrated recruits looked better than 3-stars (7.1 vs 6.2) because of SELECTION: unrated
@@ -156,3 +163,39 @@ I'm a student building this to learn and to show interviewers.
 - Metrics: Spearman (pooled and within position) and within-tier top-20% lift (tiers 2,
   3, 4-5, unrated), bootstrap CIs and paired full-minus-baseline differences.
   Transfers reported on all test rows, new players only, and matched only.
+- Added during the build: `tier_pos_lift` (lift inside tier x position cells; pooled tier
+  lift rewards putting QBs first). Two transfer leaks closed: `prior_seasons_available`
+  (= season - 2021, a disguised class year) is not a feature, and unmatched post-2021
+  transfers get prior = 0 ("no linked history") instead of a missing flag (unmatched rows
+  score 0 by construction). Some leak remains: the same failed join hides history and
+  outcome.
+- Test rows for transfer claims: prefer ORIGIN-matched entries (identity from pre-transfer
+  data). "Matched only" partly selects on the outcome (destination matches need a stat
+  line there); "all" includes unmatched rows (prior 0, outcome 0 by construction).
+
+### Modeling results (2026-11-18; numbers in data/processed/models/*.txt)
+Conclusion so far: NO robust market inefficiency. Signing-time features beyond price +
+position + level don't improve out-of-time ranking within position. One candidate signal:
+QB transfers' prior playing time.
+- Recruits (test 2023 class, n=924): nothing beats baseline_plus. Full minus baseline_plus
+  Spearman: ridge -0.013 [-0.040, +0.016], LightGBM -0.000 [-0.044, +0.043]. Best model
+  overall is ridge:baseline_plus (Spearman 0.154 [0.085, 0.222]). LightGBM < ridge.
+  SHAP puts 16% on home_area (TX +4.7, GA -3.5), which doesn't help out of time: noise.
+- Transfers (test 2024, n=790): full beats baseline_plus on POOLED Spearman (ridge +0.056
+  [+0.013, +0.097], LightGBM +0.065 [+0.014, +0.113]; holds for new players only), but
+  not within position (~+0.02, CI spans 0), not on tier_pos_lift (-2 to -4, n.s.), and
+  not on matched-only rows (ridge +0.033 [-0.012, +0.077]). Likely cross-position
+  ordering and the residual unmatched leak, not underpricing.
+- Transfer SHAP (LightGBM full): prior_plays 28%, position 25%, rating 14%, prior_par 11%,
+  hs_rating 5%; dual-threat QB +5.5; moving down a level -0.8.
+- Direct prior-plays test (`prior_plays.py`; per position, OLS controls = portal rating,
+  stars, rating_missing, unrated, destination level; + log(1 + prior plays); trained
+  2022-23 since 2021 has no prior data). Origin-matched rows, Spearman gain:
+  - PRIMARY 2-season target, test 2024: QB +0.075 [-0.008, +0.165] p=0.04; RB -0.090
+    [-0.222, +0.031]; WR +0.058 [-0.040, +0.163].
+  - SECONDARY 1-season target (different window), 2024: QB +0.119 [-0.023, +0.254];
+    2025 (train 2022-24): QB +0.117 [-0.005, +0.241] p=0.03, RB +0.064, WR +0.008.
+  - In-sample the prior-plays coefficient is positive with CI > 0 at every position
+    (QB ~ +10 to +15 PAR per SD), but out of time only QBs are consistent: positive in
+    both test years, each CI just touching 0. RB flips sign. Several comparisons were
+    run, so treat the QB result as suggestive, not established.
