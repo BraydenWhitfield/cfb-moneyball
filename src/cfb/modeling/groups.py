@@ -77,3 +77,137 @@ def eb_shrink(resid: pd.Series, groups: pd.Series) -> pd.DataFrame:
                                        se_shrunk=np.sqrt(b * sigma2 / g.n))
     out.attrs.update(tau2=tau2, sigma2=sigma2)
     return out
+
+
+# --- Group keys --------------------------------------------------------------------
+
+def head_coaches(coaches: pd.DataFrame) -> pd.DataFrame:
+    """(school, season) -> the coach with the most games that season (interims
+    and fired coaches lose), and whether he differs from the previous season."""
+    from cfb.clean import norm_team
+    c = coaches.assign(school=norm_team(coaches.school),
+                       coach=coaches.firstName + " " + coaches.lastName)
+    main = (c.sort_values(["school", "season", "games"], ascending=[True, True, False])
+             .drop_duplicates(["school", "season"])[["school", "season", "coach_id", "coach"]])
+    prev = main.assign(season=main.season + 1).rename(
+        columns={"coach_id": "prev_coach_id", "coach": "prev_coach"})
+    out = main.merge(prev, on=["school", "season"], how="left")
+    out["transition"] = out.prev_coach_id.notna() & out.prev_coach_id.ne(out.coach_id)
+    return out.drop(columns="prev_coach")
+
+
+def school_states(teams: pd.DataFrame) -> pd.Series:
+    from cfb.clean import norm_team
+    t = teams.assign(school=norm_team(teams.school))
+    return t.drop_duplicates("school").set_index("school")["location.state"]
+
+
+def add_group_keys(df: pd.DataFrame, coaches_by_season: pd.DataFrame,
+                   states: pd.Series) -> pd.DataFrame:
+    """school, school_pos, coach (FBS signing schools only), transition, in_state."""
+    df = df.copy()
+    df["school"] = df.acquiring_team.astype(object)
+    df["school_pos"] = df.school + "|" + df.position.astype(str)
+    hc = coaches_by_season.rename(columns={"school": "acquiring_team", "season": "acq_season"})
+    df = df.merge(hc[["acquiring_team", "acq_season", "coach_id", "coach", "transition"]],
+                  on=["acquiring_team", "acq_season"], how="left")
+    df["coach_id"] = df.coach_id.astype(object).where(df.coach_id.notna(), np.nan)
+    df["transition"] = df.transition.fillna(False).astype(bool)
+    state = df.acquiring_team.map(states)
+    df["in_state"] = np.where(state.isna() | df.home_state.isna(), np.nan,
+                              (state == df.home_state).astype(float))
+    return df
+
+
+# --- Persistence -------------------------------------------------------------------
+
+def _slope_corr(x, y):
+    if len(x) < 3 or np.std(x) == 0 or np.std(y) == 0:
+        return np.nan, np.nan
+    c = np.cov(x, y)
+    return c[0, 1] / c[0, 0], c[0, 1] / np.sqrt(c[0, 0] * c[1, 1])
+
+
+def _persist_once(train, test, key, col):
+    eff = eb_shrink(train[col], train[key])
+    t = test[test[key].isin(eff.index)]
+    x = t[key].map(eff.shrunk).to_numpy(float)
+    return _slope_corr(x, t[col].to_numpy(float)) + (eff.attrs["tau2"], len(t))
+
+
+def persistence(train, test, key, col="resid_w", n_boot=1000, seed=0) -> dict:
+    """Shrunk effects from `train` vs residuals in `test`, at the player level.
+
+    slope ~1: effects real and persistent; ~0: none. CIs from a bootstrap that
+    resamples whole groups (train and test rows together) and re-estimates the
+    effects each time.
+    """
+    train, test = train.dropna(subset=[key]), test.dropna(subset=[key])
+    slope, corr, tau2, n_test = _persist_once(train, test, key, col)
+    groups = np.array(sorted(set(train[key]) & set(test[key])), dtype=object)
+    tr_idx = train.groupby(key).indices
+    te_idx = test.groupby(key).indices
+    tr_r, te_r = train[col].to_numpy(float), test[col].to_numpy(float)
+    rng = np.random.default_rng(seed)
+    boots = []
+    for _ in range(n_boot):
+        pick = rng.integers(0, len(groups), len(groups))
+        tr_rows = [tr_idx[groups[p]] for p in pick]
+        te_rows = [te_idx[groups[p]] for p in pick]
+        tr = pd.DataFrame({key: np.repeat(np.arange(len(pick)), [len(r) for r in tr_rows]),
+                           col: tr_r[np.concatenate(tr_rows)]})
+        te = pd.DataFrame({key: np.repeat(np.arange(len(pick)), [len(r) for r in te_rows]),
+                           col: te_r[np.concatenate(te_rows)]})
+        boots.append(_persist_once(tr, te, key, col)[:2])
+    boots = np.array(boots, float)
+    return {"groups_train": train[key].nunique(), "groups_both": len(groups),
+            "n_test_covered": n_test, "tau2": tau2, "tau": np.sqrt(tau2),
+            "slope": slope, "slope_lo": np.nanpercentile(boots[:, 0], 2.5),
+            "slope_hi": np.nanpercentile(boots[:, 0], 97.5),
+            "corr": corr, "corr_lo": np.nanpercentile(boots[:, 1], 2.5),
+            "corr_hi": np.nanpercentile(boots[:, 1], 97.5)}
+
+
+def power_curve(train, test, key, sigma2, taus=(1, 2, 3, 5, 8), n_sim=300, seed=0):
+    """Power of the persistence correlation, using the real group sizes.
+
+    For each true effect SD tau: draw effects ~ N(0, tau^2), add N(0, sigma2)
+    noise per player in train and test, run the same EB + correlation. Power =
+    share of simulations whose correlation beats the 95th percentile of the
+    no-effect (tau = 0) simulations.
+    """
+    train, test = train.dropna(subset=[key]), test.dropna(subset=[key])
+    groups = sorted(set(train[key]) & set(test[key]))
+    n_tr = train[key].value_counts().reindex(groups).to_numpy()
+    n_te = test[key].value_counts().reindex(groups).to_numpy()
+    g_tr = np.repeat(np.arange(len(groups)), n_tr)
+    g_te = np.repeat(np.arange(len(groups)), n_te)
+    rng = np.random.default_rng(seed)
+    sd = np.sqrt(sigma2)
+
+    def sim(tau):
+        out = []
+        for _ in range(n_sim):
+            theta = rng.normal(0, tau, len(groups)) if tau > 0 else np.zeros(len(groups))
+            eff = eb_shrink(theta[g_tr] + rng.normal(0, sd, len(g_tr)), g_tr)
+            x = eff.shrunk.reindex(g_te).to_numpy(float)
+            out.append(_slope_corr(x, theta[g_te] + rng.normal(0, sd, len(g_te)))[1])
+        return np.array(out, float)
+
+    null95 = np.nanpercentile(sim(0), 95)
+    rows = []
+    for tau in taus:
+        c = sim(tau)
+        rows.append({"tau": tau, "median_corr": np.nanmedian(c),
+                     "power": float(np.nanmean(c > null95))})
+    return pd.DataFrame(rows)
+
+
+def mean_diff(df, flag, col="resid_w", n_boot=2000, seed=0) -> dict:
+    """Mean residual where flag == 1 minus where flag == 0, bootstrap CI."""
+    d = df.dropna(subset=[flag])
+    a, b = d.loc[d[flag].eq(1), col].to_numpy(), d.loc[d[flag].eq(0), col].to_numpy()
+    rng = np.random.default_rng(seed)
+    boots = [rng.choice(a, len(a)).mean() - rng.choice(b, len(b)).mean() for _ in range(n_boot)]
+    return {"n_yes": len(a), "n_no": len(b), "diff": a.mean() - b.mean(),
+            "lo": np.percentile(boots, 2.5), "hi": np.percentile(boots, 97.5)}

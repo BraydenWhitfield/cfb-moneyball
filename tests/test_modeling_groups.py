@@ -38,3 +38,50 @@ def test_residuals_are_cross_fitted_and_winsorized():
     assert out.pred.notna().all() and set(out.split) == {"train", "test"}
     assert out.resid_w.max() < out.resid.max()
     assert abs(out.loc[out.split.eq("test"), "resid"].median()) < 1
+
+
+def test_head_coaches_picks_most_games_and_flags_transitions():
+    from cfb.modeling.groups import head_coaches
+    c = pd.DataFrame({"school": ["A", "A", "A", "B", "B"], "season": [2021, 2022, 2022, 2021, 2022],
+                      "games": [12, 3, 10, 12, 12], "coach_id": ["1", "1", "2", "3", "3"],
+                      "firstName": ["X"] * 5, "lastName": ["Y"] * 5})
+    hc = head_coaches(c).set_index(["school", "season"])
+    assert hc.loc[("A", 2022), "coach_id"] == "2" and hc.loc[("A", 2022), "transition"]
+    assert not hc.loc[("B", 2022), "transition"] and not hc.loc[("A", 2021), "transition"]
+
+
+def _groups_data(tau, seed=0, n_groups=60, per=8):
+    rng = np.random.default_rng(seed)
+    theta = rng.normal(0, tau, n_groups) if tau else np.zeros(n_groups)
+    rows = []
+    for split in ["train", "test"]:
+        g = np.repeat(np.arange(n_groups), per)
+        rows.append(pd.DataFrame({"g": g.astype(str), "split": split,
+                                  "resid_w": theta[g] + rng.normal(0, 5, len(g))}))
+    d = pd.concat(rows, ignore_index=True)
+    return d[d.split.eq("train")], d[d.split.eq("test")]
+
+
+def test_persistence_recovers_real_effects_and_not_noise():
+    from cfb.modeling.groups import persistence
+    tr, te = _groups_data(tau=5)
+    real = persistence(tr, te, "g", n_boot=100)
+    assert real["corr_lo"] > 0 and 0.5 < real["slope"] < 1.5
+    tr, te = _groups_data(tau=0, seed=3)
+    null = persistence(tr, te, "g", n_boot=100)
+    assert null["corr_lo"] < 0.1
+
+
+def test_power_curve_rises_with_effect_size():
+    from cfb.modeling.groups import power_curve
+    tr, te = _groups_data(tau=0)
+    pc = power_curve(tr, te, "g", sigma2=25.0, taus=(0.5, 5), n_sim=60)
+    assert pc.power.iloc[1] > pc.power.iloc[0] and pc.power.iloc[1] > 0.8
+
+
+def test_mean_diff():
+    from cfb.modeling.groups import mean_diff
+    d = pd.DataFrame({"f": [1.0] * 50 + [0.0] * 50 + [np.nan],
+                      "resid_w": [2.0] * 50 + [0.0] * 51})
+    out = mean_diff(d, "f", n_boot=100)
+    assert out["diff"] == 2.0 and out["n_yes"] == 50 and out["n_no"] == 50
